@@ -6,5 +6,7 @@
 
 -keepattributes Exceptions,InnerClasses,EnclosingMethod,Signature
 
+-renamesourcefileattribute SourceFile
+
 -repackageclasses
 -allowaccessmodification

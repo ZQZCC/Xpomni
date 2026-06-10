@@ -12,6 +12,8 @@ plugins {
     id("com.android.application")
 }
 
+val appMinSdk = 31
+
 fun readIntLe(bytes: ByteArray, offset: Int): Int =
     (bytes[offset].toInt() and 0xff) or
         ((bytes[offset + 1].toInt() and 0xff) shl 8) or
@@ -86,9 +88,14 @@ fun stripDexDebugInfo(input: ByteArray): ByteArray {
     return bytes
 }
 
-fun shouldDropApkEntry(entry: ZipEntry, strippedDex: Map<String, ByteArray>): Boolean {
+fun dexEntryOrder(name: String): Int {
+    val suffix = Regex("""classes(\d*)\.dex""").matchEntire(name)?.groupValues?.get(1)
+    return suffix?.takeIf { it.isNotEmpty() }?.toInt() ?: 1
+}
+
+fun shouldDropApkEntry(entry: ZipEntry, dexEntryName: Regex): Boolean {
     val name = entry.name
-    return strippedDex.containsKey(name) ||
+    return dexEntryName.matches(name) ||
         name == "META-INF/MANIFEST.MF" ||
         name.startsWith("META-INF/com/") ||
         (name.startsWith("META-INF/") &&
@@ -113,7 +120,7 @@ android {
 
     defaultConfig {
         applicationId = "ka.xpomni"
-        minSdk = 31
+        minSdk = appMinSdk
         targetSdk = 36
         versionCode = 2
         versionName = "1.0.1"
@@ -194,38 +201,22 @@ tasks.register("stripReleaseDexDebugInfo") {
 
         val unsignedApk = workDir.resolve("unsigned.apk")
         val alignedApk = workDir.resolve("aligned.apk")
-        val strippedDex = linkedMapOf<String, ByteArray>()
+        val strippedDexInputDir = workDir.resolve("stripped-dex-input")
+        val compactedDexDir = workDir.resolve("compacted-dex")
+        strippedDexInputDir.mkdirs()
+        compactedDexDir.mkdirs()
+        val strippedDexInputs = mutableListOf<File>()
         val dexEntryName = Regex("""classes(\d*)?\.dex""")
 
         ZipFile(apk).use { zip ->
             zip.entries().asSequence().forEach { entry ->
                 if (dexEntryName.matches(entry.name)) {
                     zip.getInputStream(entry).use { input ->
-                        strippedDex[entry.name] = stripDexDebugInfo(input.readBytes())
+                        val strippedDex = strippedDexInputDir.resolve(entry.name)
+                        strippedDex.writeBytes(stripDexDebugInfo(input.readBytes()))
+                        strippedDexInputs += strippedDex
                     }
                 }
-            }
-        }
-
-        ZipOutputStream(BufferedOutputStream(FileOutputStream(unsignedApk))).use { output ->
-            ZipFile(apk).use { zip ->
-                zip.entries().asSequence().forEach { entry ->
-                    if (!shouldDropApkEntry(entry, strippedDex)) {
-                        output.putNextEntry(ZipEntry(entry.name))
-                        if (!entry.isDirectory) {
-                            zip.getInputStream(entry).use { input ->
-                                input.copyTo(output)
-                            }
-                        }
-                        output.closeEntry()
-                    }
-                }
-            }
-
-            strippedDex.forEach { (name, bytes) ->
-                output.putNextEntry(ZipEntry(name))
-                output.write(bytes)
-                output.closeEntry()
             }
         }
 
@@ -241,8 +232,67 @@ tasks.register("stripReleaseDexDebugInfo") {
         }
 
         val buildTools = File(sdkPath, "build-tools/${android.buildToolsVersion}")
+        val d8Jar = buildTools.resolve("lib/d8.jar")
         val zipalign = buildTools.resolve(if (windows) "zipalign.exe" else "zipalign")
         val apksigner = buildTools.resolve(if (windows) "apksigner.bat" else "apksigner")
+        val javaExecutable = File(System.getProperty("java.home"), "bin/${if (windows) "java.exe" else "java"}")
+
+        if (!d8Jar.isFile) {
+            throw GradleException("D8 jar was not found at ${d8Jar.absolutePath}.")
+        }
+        if (!javaExecutable.isFile) {
+            throw GradleException("Java executable was not found at ${javaExecutable.absolutePath}.")
+        }
+
+        if (strippedDexInputs.isNotEmpty()) {
+            providers.exec {
+                commandLine(
+                    listOf(
+                        javaExecutable.absolutePath,
+                        "-cp",
+                        d8Jar.absolutePath,
+                        "com.android.tools.r8.D8",
+                        "--release",
+                        "--min-api",
+                        appMinSdk.toString(),
+                        "--output",
+                        compactedDexDir.absolutePath,
+                    ) + strippedDexInputs.map { it.absolutePath },
+                )
+            }.result.get().assertNormalExitValue()
+        }
+
+        val compactedDex = compactedDexDir.listFiles { file ->
+            file.isFile && dexEntryName.matches(file.name)
+        }?.sortedBy { dexEntryOrder(it.name) }.orEmpty()
+
+        if (strippedDexInputs.isNotEmpty() && compactedDex.isEmpty()) {
+            throw GradleException("D8 did not emit any compacted dex files.")
+        }
+
+        ZipOutputStream(BufferedOutputStream(FileOutputStream(unsignedApk))).use { output ->
+            ZipFile(apk).use { zip ->
+                zip.entries().asSequence().forEach { entry ->
+                    if (!shouldDropApkEntry(entry, dexEntryName)) {
+                        output.putNextEntry(ZipEntry(entry.name))
+                        if (!entry.isDirectory) {
+                            zip.getInputStream(entry).use { input ->
+                                input.copyTo(output)
+                            }
+                        }
+                        output.closeEntry()
+                    }
+                }
+            }
+
+            compactedDex.forEach { file ->
+                output.putNextEntry(ZipEntry(file.name))
+                file.inputStream().use { input ->
+                    input.copyTo(output)
+                }
+                output.closeEntry()
+            }
+        }
 
         providers.exec {
             commandLine(zipalign.absolutePath, "-f", "-p", "4", unsignedApk.absolutePath, alignedApk.absolutePath)
