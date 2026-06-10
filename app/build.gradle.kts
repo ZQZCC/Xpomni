@@ -1,0 +1,288 @@
+import java.io.BufferedOutputStream
+import java.io.FileOutputStream
+import java.security.MessageDigest
+import java.util.Locale
+import java.util.Properties
+import java.util.zip.Adler32
+import java.util.zip.ZipEntry
+import java.util.zip.ZipFile
+import java.util.zip.ZipOutputStream
+
+plugins {
+    id("com.android.application")
+}
+
+fun readIntLe(bytes: ByteArray, offset: Int): Int =
+    (bytes[offset].toInt() and 0xff) or
+        ((bytes[offset + 1].toInt() and 0xff) shl 8) or
+        ((bytes[offset + 2].toInt() and 0xff) shl 16) or
+        ((bytes[offset + 3].toInt() and 0xff) shl 24)
+
+fun writeIntLe(bytes: ByteArray, offset: Int, value: Int) {
+    bytes[offset] = value.toByte()
+    bytes[offset + 1] = (value shr 8).toByte()
+    bytes[offset + 2] = (value shr 16).toByte()
+    bytes[offset + 3] = (value shr 24).toByte()
+}
+
+fun readUleb128(bytes: ByteArray, offsetRef: IntArray): Int {
+    var result = 0
+    var shift = 0
+    var offset = offsetRef[0]
+    while (true) {
+        val value = bytes[offset++].toInt() and 0xff
+        result = result or ((value and 0x7f) shl shift)
+        if ((value and 0x80) == 0) break
+        shift += 7
+    }
+    offsetRef[0] = offset
+    return result
+}
+
+fun updateDexHashes(bytes: ByteArray) {
+    val sha1 = MessageDigest.getInstance("SHA-1")
+    sha1.update(bytes, 32, bytes.size - 32)
+    System.arraycopy(sha1.digest(), 0, bytes, 12, 20)
+
+    val adler32 = Adler32()
+    adler32.update(bytes, 12, bytes.size - 12)
+    writeIntLe(bytes, 8, adler32.value.toInt())
+}
+
+fun stripDexDebugInfo(input: ByteArray): ByteArray {
+    val bytes = input.clone()
+    val classDefsSize = readIntLe(bytes, 0x60)
+    val classDefsOff = readIntLe(bytes, 0x64)
+
+    for (classIndex in 0 until classDefsSize) {
+        val classDefOff = classDefsOff + classIndex * 32
+        writeIntLe(bytes, classDefOff + 16, -1)
+
+        val classDataOff = readIntLe(bytes, classDefOff + 24)
+        if (classDataOff == 0) continue
+
+        val cursor = intArrayOf(classDataOff)
+        val staticFieldsSize = readUleb128(bytes, cursor)
+        val instanceFieldsSize = readUleb128(bytes, cursor)
+        val directMethodsSize = readUleb128(bytes, cursor)
+        val virtualMethodsSize = readUleb128(bytes, cursor)
+
+        repeat(staticFieldsSize + instanceFieldsSize) {
+            readUleb128(bytes, cursor)
+            readUleb128(bytes, cursor)
+        }
+
+        repeat(directMethodsSize + virtualMethodsSize) {
+            readUleb128(bytes, cursor)
+            readUleb128(bytes, cursor)
+            val codeOff = readUleb128(bytes, cursor)
+            if (codeOff != 0) {
+                writeIntLe(bytes, codeOff + 8, 0)
+            }
+        }
+    }
+
+    updateDexHashes(bytes)
+    return bytes
+}
+
+fun shouldDropApkEntry(entry: ZipEntry, strippedDex: Map<String, ByteArray>): Boolean {
+    val name = entry.name
+    return strippedDex.containsKey(name) ||
+        name == "META-INF/MANIFEST.MF" ||
+        name.startsWith("META-INF/com/") ||
+        (name.startsWith("META-INF/") &&
+            (name.endsWith(".RSA") || name.endsWith(".DSA") ||
+                name.endsWith(".EC") || name.endsWith(".SF")))
+}
+
+val localProperties = Properties().apply {
+    val file = project.rootProject.file("local.properties")
+    if (file.exists()) {
+        file.inputStream().use(::load)
+    }
+}
+
+android {
+    compileSdk {
+        version = release(36) {
+            minorApiLevel = 1
+        }
+    }
+    buildToolsVersion = "36.1.0"
+
+    defaultConfig {
+        applicationId = "ka.xpomni"
+        minSdk = 31
+        targetSdk = 36
+        versionCode = 2
+        versionName = "1.0.1"
+    }
+
+    signingConfigs {
+        if (localProperties.getProperty("storeFile") != null) {
+            create("config") {
+                storeFile = project.rootProject.file(localProperties.getProperty("storeFile"))
+                storePassword = localProperties.getProperty("storePassword")
+                keyAlias = localProperties.getProperty("keyAlias")
+                keyPassword = localProperties.getProperty("keyPassword")
+            }
+        }
+    }
+
+    buildTypes {
+        configureEach {
+            vcsInfo.include = false
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+        }
+        debug {
+            if (localProperties.getProperty("storeFile") != null) {
+                signingConfig = signingConfigs.getByName("config")
+            }
+        }
+        release {
+            signingConfig = if (localProperties.getProperty("storeFile") != null) {
+                signingConfigs.getByName("config")
+            } else {
+                signingConfigs.getByName("debug")
+            }
+            vcsInfo.include = false
+            isMinifyEnabled = true
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_21
+        targetCompatibility = JavaVersion.VERSION_21
+    }
+
+    lint {
+        checkReleaseBuilds = false
+    }
+
+    packaging {
+        resources {
+            excludes += setOf(
+                "kotlin/**",
+                "META-INF/com/**",
+                "META-INF/*.kotlin_module",
+                "META-INF/kotlin*",
+                "META-INF/versions/**",
+                "DebugProbesKt.bin",
+            )
+        }
+    }
+
+    dependenciesInfo.includeInApk = false
+    enableKotlin = true
+    namespace = "ka.xpomni"
+}
+
+dependencies {
+    compileOnly("androidx.annotation:annotation:1.9.1")
+    compileOnly("io.github.libxposed:api:101.0.1")
+}
+
+tasks.register("stripReleaseDexDebugInfo") {
+    dependsOn("packageRelease")
+
+    doLast {
+        val apk = layout.buildDirectory.file("outputs/apk/release/app-release.apk").get().asFile
+        val workDir = layout.buildDirectory.dir("stripReleaseDexDebugInfo").get().asFile
+        delete(workDir)
+        workDir.mkdirs()
+
+        val unsignedApk = workDir.resolve("unsigned.apk")
+        val alignedApk = workDir.resolve("aligned.apk")
+        val strippedDex = linkedMapOf<String, ByteArray>()
+        val dexEntryName = Regex("""classes(\d*)?\.dex""")
+
+        ZipFile(apk).use { zip ->
+            zip.entries().asSequence().forEach { entry ->
+                if (dexEntryName.matches(entry.name)) {
+                    zip.getInputStream(entry).use { input ->
+                        strippedDex[entry.name] = stripDexDebugInfo(input.readBytes())
+                    }
+                }
+            }
+        }
+
+        ZipOutputStream(BufferedOutputStream(FileOutputStream(unsignedApk))).use { output ->
+            ZipFile(apk).use { zip ->
+                zip.entries().asSequence().forEach { entry ->
+                    if (!shouldDropApkEntry(entry, strippedDex)) {
+                        output.putNextEntry(ZipEntry(entry.name))
+                        if (!entry.isDirectory) {
+                            zip.getInputStream(entry).use { input ->
+                                input.copyTo(output)
+                            }
+                        }
+                        output.closeEntry()
+                    }
+                }
+            }
+
+            strippedDex.forEach { (name, bytes) ->
+                output.putNextEntry(ZipEntry(name))
+                output.write(bytes)
+                output.closeEntry()
+            }
+        }
+
+        val windows = System.getProperty("os.name").lowercase(Locale.ROOT).contains("windows")
+        var sdkPath = System.getenv("ANDROID_HOME") ?: System.getenv("ANDROID_SDK_ROOT")
+        if (sdkPath == null && rootProject.file("local.properties").exists()) {
+            val sdkProperties = Properties()
+            rootProject.file("local.properties").inputStream().use { sdkProperties.load(it) }
+            sdkPath = sdkProperties.getProperty("sdk.dir")
+        }
+        if (sdkPath == null) {
+            throw GradleException("ANDROID_HOME or sdk.dir is required to strip dex debug info.")
+        }
+
+        val buildTools = File(sdkPath, "build-tools/${android.buildToolsVersion}")
+        val zipalign = buildTools.resolve(if (windows) "zipalign.exe" else "zipalign")
+        val apksigner = buildTools.resolve(if (windows) "apksigner.bat" else "apksigner")
+
+        providers.exec {
+            commandLine(zipalign.absolutePath, "-f", "-p", "4", unsignedApk.absolutePath, alignedApk.absolutePath)
+        }.result.get().assertNormalExitValue()
+
+        val signing = android.buildTypes.getByName("release").signingConfig
+        if (signing == null || signing.storeFile == null) {
+            throw GradleException("Release signing config is required after stripping dex debug info.")
+        }
+
+        val signCommand = mutableListOf(
+            apksigner.absolutePath,
+            "sign",
+            "--ks",
+            signing.storeFile!!.absolutePath,
+        )
+        signing.storePassword?.let {
+            signCommand += listOf("--ks-pass", "pass:$it")
+        }
+        signing.keyAlias?.let {
+            signCommand += listOf("--ks-key-alias", it)
+        }
+        signing.keyPassword?.let {
+            signCommand += listOf("--key-pass", "pass:$it")
+        }
+        signing.storeType?.let {
+            signCommand += listOf("--ks-type", it)
+        }
+        signCommand += listOf("--out", apk.absolutePath, alignedApk.absolutePath)
+
+        providers.exec {
+            commandLine(signCommand)
+        }.result.get().assertNormalExitValue()
+
+        delete(layout.buildDirectory.dir("outputs/mapping/release"))
+    }
+}
+
+afterEvaluate {
+    tasks.named("assembleRelease").configure {
+        finalizedBy("stripReleaseDexDebugInfo")
+    }
+}
