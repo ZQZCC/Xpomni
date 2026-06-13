@@ -3,6 +3,7 @@ android
 com.android.intentresolver
 com.android.systemui
 com.google.android.as
+com.github.android
 com.google.android.apps.nexuslauncher
 com.android.launcher3
 com.flyme.systemuiex

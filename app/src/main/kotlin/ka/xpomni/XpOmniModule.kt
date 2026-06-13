@@ -114,6 +114,12 @@ class XpOmniModule : XposedModule() {
                 hookShareTargets()
             }
 
+            GITHUB -> {
+                runHook("hook GitHub FastPass") {
+                    hookGitHubFastPass(classLoader)
+                }
+            }
+
             PIXEL_LAUNCHER, LAUNCHER3 -> {
                 hookPixelLauncherFeatures(classLoader)
             }
