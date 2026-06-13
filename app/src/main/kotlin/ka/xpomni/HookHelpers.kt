@@ -8,7 +8,6 @@ import android.os.Build
 import android.util.Log
 import io.github.libxposed.api.XposedInterface.Chain
 import io.github.libxposed.api.XposedInterface.Hooker
-import io.github.libxposed.api.XposedModule
 import java.lang.reflect.Executable
 import java.lang.reflect.Field
 import java.lang.reflect.Method
@@ -37,7 +36,7 @@ internal val SHARE_SHEET_PACKAGE =
 private val fieldCache = ConcurrentHashMap<String, Field>()
 private val methodCache = ConcurrentHashMap<String, Method>()
 
-internal fun XposedModule.runHook(
+internal fun XpOmniModule.runHook(
     name: String,
     block: () -> Unit,
 ) {
@@ -46,7 +45,7 @@ internal fun XposedModule.runHook(
     }
 }
 
-internal fun XposedModule.runOptionalHook(
+internal fun XpOmniModule.runOptionalHook(
     name: String,
     block: () -> Unit,
 ) {
@@ -57,7 +56,7 @@ internal fun XposedModule.runOptionalHook(
     }
 }
 
-internal fun XposedModule.hookMethods(
+internal fun XpOmniModule.hookMethods(
     clazz: Class<*>,
     vararg names: String,
     block: Chain.() -> Any?,
@@ -68,7 +67,7 @@ internal fun XposedModule.hookMethods(
     }
 }
 
-internal fun XposedModule.hookConstructors(
+internal fun XpOmniModule.hookConstructors(
     clazz: Class<*>,
     block: Chain.() -> Any?,
 ) {
@@ -77,7 +76,7 @@ internal fun XposedModule.hookConstructors(
     }
 }
 
-internal fun XposedModule.intercept(
+internal fun XpOmniModule.intercept(
     executable: Executable,
     block: Chain.() -> Any?,
 ) {
