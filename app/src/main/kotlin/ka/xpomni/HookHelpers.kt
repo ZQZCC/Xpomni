@@ -1,0 +1,193 @@
+@file:android.annotation.SuppressLint("PrivateApi", "BlockedPrivateApi", "DiscouragedApi")
+
+package ka.xpomni
+
+import android.app.Activity
+import android.app.AlertDialog
+import android.os.Build
+import android.util.Log
+import io.github.libxposed.api.XposedInterface.Chain
+import io.github.libxposed.api.XposedInterface.Hooker
+import io.github.libxposed.api.XposedModule
+import java.lang.reflect.Executable
+import java.lang.reflect.Field
+import java.lang.reflect.Method
+import java.util.concurrent.ConcurrentHashMap
+import kotlin.system.exitProcess
+
+internal const val TAG = "Xpomni"
+internal const val ANDROID_FRAMEWORK = "android"
+internal const val INTENT_RESOLVER = "com.android.intentresolver"
+internal const val ANDROID_SYSTEM_INTELLIGENCE = "com.google.android.as"
+internal const val PIXEL_LAUNCHER = "com.google.android.apps.nexuslauncher"
+internal const val LAUNCHER3 = "com.android.launcher3"
+internal const val SYSTEMUI = "com.android.systemui"
+internal const val OPLUS_APPPLATFORM = "com.oplus.appplatform"
+internal const val OPLUS_SCREENSHOT = "com.oplus.screenshot"
+internal const val FLYME_SYSTEMUIEX = "com.flyme.systemuiex"
+internal const val MIUI_SCREENSHOT = "com.miui.screenshot"
+
+internal val SHARE_SHEET_PACKAGE =
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        INTENT_RESOLVER
+    } else {
+        ANDROID_FRAMEWORK
+    }
+
+private val fieldCache = ConcurrentHashMap<String, Field>()
+private val methodCache = ConcurrentHashMap<String, Method>()
+
+internal fun XposedModule.runHook(
+    name: String,
+    block: () -> Unit,
+) {
+    runCatching(block).onFailure { error ->
+        log(Log.ERROR, TAG, "$name failed", error)
+    }
+}
+
+internal fun XposedModule.runOptionalHook(
+    name: String,
+    block: () -> Unit,
+) {
+    runCatching(block).onFailure { error ->
+        if (error !is ClassNotFoundException) {
+            log(Log.ERROR, TAG, "$name failed", error)
+        }
+    }
+}
+
+internal fun XposedModule.hookMethods(
+    clazz: Class<*>,
+    vararg names: String,
+    block: Chain.() -> Any?,
+) {
+    for (method in clazz.declaredMethods) {
+        if (!method.name.matchesAny(names)) continue
+        intercept(method, block)
+    }
+}
+
+internal fun XposedModule.hookConstructors(
+    clazz: Class<*>,
+    block: Chain.() -> Any?,
+) {
+    clazz.declaredConstructors.forEach { constructor ->
+        intercept(constructor, block)
+    }
+}
+
+internal fun XposedModule.intercept(
+    executable: Executable,
+    block: Chain.() -> Any?,
+) {
+    hook(executable).intercept(Hooker { chain -> chain.block() })
+}
+
+internal fun XpOmniModule.hookOnResume() {
+    val onResume = Activity::class.java.getDeclaredMethod("onResume")
+
+    intercept(onResume) {
+        AlertDialog.Builder(thisObject as Activity)
+            .setTitle("Xpomni")
+            .setMessage("Incorrect module usage, remove this app from scope.")
+            .setCancelable(false)
+            .setPositiveButton("OK") { _, _ -> exitProcess(0) }
+            .show()
+        proceed()
+    }
+}
+
+internal fun Chain.afterProceed(action: (Any?) -> Unit): Any? {
+    val result = proceed()
+    action(thisObject)
+    return result
+}
+
+internal fun Chain.argsArray(): Array<Any?> = args.toTypedArray()
+
+internal inline fun <T> attempt(
+    fallback: T,
+    block: () -> T,
+): T =
+    try {
+        block()
+    } catch (_: Throwable) {
+        fallback
+    }
+
+internal fun Any.invokeMethod(
+    name: String,
+    vararg args: Any?,
+): Boolean =
+    methodOrNull(name, args.size)?.let { method ->
+        attempt(false) {
+            method.invoke(this, *args)
+            true
+        }
+    } ?: false
+
+internal fun Any.writeField(
+    name: String,
+    value: Any?,
+): Boolean =
+    fieldOrNull(name)?.let { field ->
+        attempt(false) {
+            field.set(this, value)
+            true
+        }
+    } ?: false
+
+internal fun Any.readField(name: String): Any? =
+    fieldOrNull(name)?.let { field -> attempt(null) { field.get(this) } }
+
+private fun Any.fieldOrNull(name: String): Field? {
+    val key = "${javaClass.name}#$name"
+    return fieldCache[key] ?: lookupField(name)?.also { fieldCache[key] = it }
+}
+
+private fun Any.lookupField(name: String): Field? {
+    var type: Class<*>? = javaClass
+    while (type != null) {
+        try {
+            val field = type.getDeclaredField(name)
+            field.isAccessible = true
+            return field
+        } catch (_: Throwable) {
+            type = type.superclass
+        }
+    }
+    return null
+}
+
+internal fun Any.methodOrNull(
+    name: String,
+    parameterCount: Int,
+): Method? {
+    val key = "${javaClass.name}#$name/$parameterCount"
+    return methodCache[key] ?: lookupMethod(name, parameterCount)?.also { methodCache[key] = it }
+}
+
+private fun Any.lookupMethod(
+    name: String,
+    parameterCount: Int,
+): Method? {
+    var type: Class<*>? = javaClass
+    while (type != null) {
+        for (method in type.declaredMethods) {
+            if (method.name == name && method.parameterCount == parameterCount) {
+                method.isAccessible = true
+                return method
+            }
+        }
+        type = type.superclass
+    }
+    return null
+}
+
+internal fun String.matchesAny(names: Array<out String>): Boolean {
+    for (name in names) {
+        if (this == name) return true
+    }
+    return false
+}

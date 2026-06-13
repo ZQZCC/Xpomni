@@ -1,0 +1,359 @@
+@file:android.annotation.SuppressLint("PrivateApi", "BlockedPrivateApi", "DiscouragedApi", "MissingPermission")
+
+package ka.xpomni
+
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.content.res.Resources
+import android.os.Build
+import android.os.SystemClock
+import android.os.VibrationEffect
+import android.os.VibratorManager
+import android.util.Log
+import android.view.MotionEvent
+import android.view.View
+import java.lang.reflect.Method
+import java.util.concurrent.ConcurrentHashMap
+import kotlin.math.hypot
+
+private const val DOUBLE_TAP_TIMEOUT = 400L
+private const val TAP_DISTANCE_THRESHOLD = 50f
+private const val QSB_WIDGET_HEIGHT = "qsb_widget_height"
+private const val SLEEP_ACTION = "ka.xpomni.action.PIXEL_LAUNCHER_SLEEP"
+private const val SLEEP_TOKEN_EXTRA = "ka.xpomni.extra.SLEEP_TOKEN"
+private const val SLEEP_TOKEN = "xpomni_pixel_launcher_sleep"
+
+private var firstTapTime = 0L
+private var firstTapX = 0f
+private var firstTapY = 0f
+private var isFirstTapRunning = false
+private var isFirstTapComplete = false
+private var pixelLauncherContext: Context? = null
+
+@Volatile
+private var sleepReceiverRegistered = false
+
+@Volatile
+private var pixelResourceHooksInstalled = false
+
+@Volatile
+private var qsbWidgetHeightId = 0
+
+@Volatile
+private var goToSleepMethod: Method? = null
+
+private val nonQsbWidgetHeightIds = ConcurrentHashMap.newKeySet<Int>()
+private val sentFromUidMethod by lazy(LazyThreadSafetyMode.PUBLICATION) {
+    BroadcastReceiver::class.java
+        .getDeclaredMethod("getSentFromUid")
+        .apply { isAccessible = true }
+}
+
+internal fun XpOmniModule.hookPixelLauncherFeatures(classLoader: ClassLoader) {
+    runOptionalHook("hook Pixel Launcher shortcut badges") {
+        hookPixelShortcutBadges(classLoader)
+    }
+    runOptionalHook("hook Pixel Launcher bottom search bar") {
+        hookPixelBottomSearchBar(classLoader)
+        hookPixelSearchBarResources()
+    }
+    runOptionalHook("hook Pixel Launcher double tap sleep") {
+        hookPixelDoubleTapSleep(classLoader)
+    }
+}
+
+private fun XpOmniModule.hookPixelShortcutBadges(classLoader: ClassLoader) {
+    val bubbleTextViewClass = classLoader.loadClass("com.android.launcher3.BubbleTextView")
+
+    hookConstructors(bubbleTextViewClass) {
+        afterProceed { view ->
+            view?.writeField("mHideBadge", true)
+        }
+    }
+
+    hookMethods(bubbleTextViewClass, "setHideBadge") {
+        afterProceed { view ->
+            view?.writeField("mHideBadge", true)
+        }
+    }
+
+    runOptionalHook("hook Pixel Launcher bitmap badges") {
+        val bitmapInfoClass = classLoader.loadClass("com.android.launcher3.icons.BitmapInfo")
+
+        hookMethods(bitmapInfoClass, "applyFlags") {
+            val result = proceed()
+            getArg(1)?.clearLauncherDrawableBadge()
+            result
+        }
+
+        hookMethods(bitmapInfoClass, "newIcon") {
+            proceed().also { icon ->
+                icon?.clearLauncherDrawableBadge()
+            }
+        }
+    }
+
+    log(Log.INFO, TAG, "hooked Pixel Launcher shortcut badges")
+}
+
+private fun XpOmniModule.hookPixelBottomSearchBar(classLoader: ClassLoader) {
+    val hotseatClass = classLoader.loadClass("com.android.launcher3.Hotseat")
+
+    hookConstructors(hotseatClass) {
+        afterProceed { hotseat ->
+            hotseat?.hideLauncherSearchBar()
+        }
+    }
+
+    hookMethods(hotseatClass, "setInsets") {
+        afterProceed { hotseat ->
+            hotseat?.hideLauncherSearchBar()
+        }
+    }
+
+    log(Log.INFO, TAG, "hooked Pixel Launcher bottom search bar")
+}
+
+private fun XpOmniModule.hookPixelSearchBarResources() {
+    synchronized(XpOmniModule::class.java) {
+        if (pixelResourceHooksInstalled) return@synchronized
+        hookResourceDimension("getDimension", 0f)
+        hookResourceDimension("getDimensionPixelOffset", 0)
+        hookResourceDimension("getDimensionPixelSize", 0)
+        pixelResourceHooksInstalled = true
+    }
+}
+
+private fun XpOmniModule.hookResourceDimension(
+    methodName: String,
+    replacement: Any,
+) {
+    val method = Resources::class.java.getDeclaredMethod(
+        methodName,
+        Int::class.javaPrimitiveType!!,
+    )
+
+    intercept(method) {
+        val resources = thisObject as Resources
+        val resId = getArg(0) as Int
+        if (resources.isLauncherQsbHeight(resId)) {
+            replacement
+        } else {
+            proceed()
+        }
+    }
+}
+
+private fun XpOmniModule.hookPixelDoubleTapSleep(classLoader: ClassLoader) {
+    val workspaceTouchListenerClass =
+        classLoader.loadClass("com.android.launcher3.touch.WorkspaceTouchListener")
+
+    hookMethods(workspaceTouchListenerClass, "onTouch") {
+        val result = proceed()
+        val event = getArg(1) as MotionEvent
+        val context = thisObject?.launcherTouchContext() ?: return@hookMethods result
+        handleDoubleTapToSleep(context, event)
+        result
+    }
+
+    log(Log.INFO, TAG, "hooked Pixel Launcher double tap sleep")
+}
+
+internal fun XpOmniModule.hookLauncherSleepReceiver(classLoader: ClassLoader) {
+    val phoneWindowManagerClass =
+        classLoader.loadClass("com.android.server.policy.PhoneWindowManager")
+
+    hookMethods(phoneWindowManagerClass, "init") {
+        proceed().also {
+            (args.firstOrNull { it is Context } as? Context)
+                ?.let(::registerLauncherSleepReceiver)
+        }
+    }
+}
+
+private fun XpOmniModule.registerLauncherSleepReceiver(context: Context) {
+    if (sleepReceiverRegistered) return
+
+    synchronized(XpOmniModule::class.java) {
+        if (sleepReceiverRegistered) return
+
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(receiverContext: Context, intent: Intent?) {
+                if (intent?.action != SLEEP_ACTION ||
+                    intent.getStringExtra(SLEEP_TOKEN_EXTRA) != SLEEP_TOKEN ||
+                    !isTrustedLauncherSleepSender(receiverContext)
+                ) {
+                    return
+                }
+
+                runCatching {
+                    receiverContext.goToSleepNow()
+                }.onFailure { error ->
+                    log(Log.ERROR, TAG, "launcher sleep receiver failed", error)
+                }
+            }
+        }
+        val filter = IntentFilter(SLEEP_ACTION)
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            context.registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED)
+        } else {
+            @Suppress("DEPRECATION")
+            context.registerReceiver(receiver, filter)
+        }
+
+        sleepReceiverRegistered = true
+        log(Log.INFO, TAG, "registered launcher sleep receiver")
+    }
+}
+
+private fun BroadcastReceiver.isTrustedLauncherSleepSender(context: Context): Boolean {
+    val senderUid = attempt(-1) {
+        sentFromUidMethod.invoke(this) as Int
+    }
+
+    if (senderUid < 0) return true
+
+    return context.packageManager
+        .getPackagesForUid(senderUid)
+        .orEmpty()
+        .any { it.isPixelLauncherPackage() }
+}
+
+private fun XpOmniModule.handleDoubleTapToSleep(
+    context: Context,
+    event: MotionEvent,
+) {
+    when (event.actionMasked) {
+        MotionEvent.ACTION_DOWN -> {
+            val currentTime = SystemClock.uptimeMillis()
+            if (currentTime - firstTapTime > DOUBLE_TAP_TIMEOUT) {
+                resetDoubleTapState()
+            }
+
+            if (!isFirstTapRunning) {
+                firstTapTime = currentTime
+                firstTapX = event.x
+                firstTapY = event.y
+                isFirstTapRunning = true
+            } else if (isFirstTapComplete) {
+                if (event.distanceFromFirstTap() <= TAP_DISTANCE_THRESHOLD) {
+                    vibrateTick(context)
+                    requestDeviceSleep(context)
+                }
+                resetDoubleTapState()
+            }
+        }
+
+        MotionEvent.ACTION_UP -> {
+            if (isFirstTapRunning && !isFirstTapComplete) {
+                isFirstTapComplete = true
+            }
+        }
+
+        MotionEvent.ACTION_MOVE -> {
+            if (isFirstTapRunning && event.distanceFromFirstTap() > TAP_DISTANCE_THRESHOLD) {
+                resetDoubleTapState()
+            }
+        }
+    }
+}
+
+private fun MotionEvent.distanceFromFirstTap(): Double =
+    hypot(
+        (x - firstTapX).toDouble(),
+        (y - firstTapY).toDouble(),
+    )
+
+private fun resetDoubleTapState() {
+    isFirstTapRunning = false
+    isFirstTapComplete = false
+}
+
+private fun vibrateTick(context: Context) {
+    attempt(Unit) {
+        val vibrator = context
+            .getSystemService(VibratorManager::class.java)
+            ?.defaultVibrator
+            ?: return@attempt
+        vibrator.vibrate(VibrationEffect.createPredefined(VibrationEffect.EFFECT_TICK))
+    }
+}
+
+private fun XpOmniModule.requestDeviceSleep(context: Context) {
+    try {
+        context.goToSleepNow()
+    } catch (_: Throwable) {
+        context.sendBroadcast(
+            Intent(SLEEP_ACTION)
+                .setPackage(ANDROID_FRAMEWORK)
+                .putExtra(SLEEP_TOKEN_EXTRA, SLEEP_TOKEN)
+                .addFlags(Intent.FLAG_RECEIVER_FOREGROUND),
+        )
+    }
+}
+
+private fun Context.goToSleepNow() {
+    val powerManager = getSystemService(Context.POWER_SERVICE)
+        ?: throw IllegalStateException("PowerManager unavailable")
+    val goToSleep = goToSleepMethod
+        ?: powerManager.methodOrNull("goToSleep", parameterCount = 1)?.also {
+            goToSleepMethod = it
+        }
+        ?: throw NoSuchMethodException("PowerManager.goToSleep")
+
+    goToSleep.invoke(powerManager, SystemClock.uptimeMillis())
+}
+
+private fun Any.launcherTouchContext(): Context? =
+    pixelLauncherContext ?: ((readField("mLauncher") as? Context)
+        ?: (readField("mWorkspace") as? View)?.context)
+        ?.let { context ->
+            (context.applicationContext ?: context).also { pixelLauncherContext = it }
+        }
+
+private fun Any.hideLauncherSearchBar() {
+    (readField("mQsb") as? View)?.apply {
+        cacheQsbHeightId()
+        visibility = View.GONE
+        alpha = 0f
+        isEnabled = false
+        importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+        layoutParams = layoutParams?.apply {
+            height = 0
+        }
+    }
+}
+
+private fun View.cacheQsbHeightId() {
+    if (qsbWidgetHeightId != 0) return
+
+    val id = context.resources.getIdentifier(QSB_WIDGET_HEIGHT, "dimen", context.packageName)
+    if (id != 0) qsbWidgetHeightId = id
+}
+
+private fun Resources.isLauncherQsbHeight(resId: Int): Boolean {
+    val cachedId = qsbWidgetHeightId
+    if (cachedId != 0) return resId == cachedId
+    if (resId == 0 || resId in nonQsbWidgetHeightIds) return false
+
+    val matched = attempt(false) {
+        getResourceEntryName(resId) == QSB_WIDGET_HEIGHT &&
+            getResourcePackageName(resId).isPixelLauncherPackage()
+    }
+
+    if (matched) qsbWidgetHeightId = resId else nonQsbWidgetHeightIds += resId
+    return matched
+}
+
+private fun Any.clearLauncherDrawableBadge() {
+    if (!invokeMethod("setBadge", null)) {
+        writeField("badge", null)
+        invokeMethod("updateFilter")
+    }
+}
+
+private fun String.isPixelLauncherPackage(): Boolean =
+    this == PIXEL_LAUNCHER || this == LAUNCHER3
