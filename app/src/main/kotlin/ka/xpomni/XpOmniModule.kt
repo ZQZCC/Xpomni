@@ -120,6 +120,12 @@ class XpOmniModule : XposedModule() {
                 }
             }
 
+            FLUD_PLUS -> {
+                runHook("update Flud default trackers") {
+                    hookFludTrackerUpdater()
+                }
+            }
+
             PIXEL_LAUNCHER, LAUNCHER3 -> {
                 hookPixelLauncherFeatures(classLoader)
             }
