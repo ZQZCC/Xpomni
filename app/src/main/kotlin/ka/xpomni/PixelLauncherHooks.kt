@@ -14,6 +14,8 @@ import android.os.VibratorManager
 import android.util.Log
 import android.view.MotionEvent
 import android.view.View
+import io.github.libxposed.api.XposedInterface.Chain
+import java.lang.reflect.Executable
 import java.lang.reflect.Method
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.hypot
@@ -34,6 +36,12 @@ private var pixelLauncherContext: Context? = null
 
 @Volatile
 private var sleepReceiverRegistered = false
+
+@Volatile
+private var sleepReceiverContext: Context? = null
+
+@Volatile
+private var launcherSleepReceiver: BroadcastReceiver? = null
 
 @Volatile
 private var pixelResourceHooksInstalled = false
@@ -204,10 +212,121 @@ private fun XpOmniModule.registerLauncherSleepReceiver(context: Context) {
             context.registerReceiver(receiver, filter)
         }
 
+        sleepReceiverContext = context
+        launcherSleepReceiver = receiver
         sleepReceiverRegistered = true
         log(Log.INFO, TAG, "registered launcher sleep receiver")
     }
 }
+
+internal fun pixelLauncherHotReloadState(): Context? =
+    if (launcherSleepReceiver != null) sleepReceiverContext else null
+
+internal fun XpOmniModule.releasePixelLauncherHotReloadState(): Boolean {
+    val receiver = launcherSleepReceiver ?: return true
+    val context = sleepReceiverContext ?: return true.also {
+        launcherSleepReceiver = null
+        sleepReceiverRegistered = false
+    }
+
+    return runCatching {
+        context.unregisterReceiver(receiver)
+    }.onFailure { error ->
+        log(Log.WARN, TAG, "launcher sleep receiver unregister failed", error)
+    }.isSuccess.also { released ->
+        if (released) {
+            launcherSleepReceiver = null
+            sleepReceiverContext = null
+            sleepReceiverRegistered = false
+        }
+    }
+}
+
+internal fun XpOmniModule.restorePixelLauncherHotReloadState(state: Any?) {
+    val context = state as? Context ?: return
+    registerLauncherSleepReceiver(context)
+}
+
+internal fun XpOmniModule.handlePixelLauncherHotReloadHook(
+    executable: Executable,
+    chain: Chain,
+): Any? =
+    with(chain) {
+        when {
+            executable.declaringClass.name == "com.android.launcher3.BubbleTextView" &&
+                executable.name == "setHideBadge" -> {
+                afterProceed { view ->
+                    view?.writeField("mHideBadge", true)
+                }
+            }
+
+            executable.declaringClass.name == "com.android.launcher3.BubbleTextView" -> {
+                afterProceed { view ->
+                    view?.writeField("mHideBadge", true)
+                }
+            }
+
+            executable.declaringClass.name == "com.android.launcher3.icons.BitmapInfo" &&
+                executable.name == "applyFlags" -> {
+                val result = proceed()
+                getArg(1)?.clearLauncherDrawableBadge()
+                result
+            }
+
+            executable.declaringClass.name == "com.android.launcher3.icons.BitmapInfo" &&
+                executable.name == "newIcon" -> {
+                proceed().also { icon ->
+                    icon?.clearLauncherDrawableBadge()
+                }
+            }
+
+            executable.declaringClass.name == "com.android.launcher3.Hotseat" &&
+                executable.name == "setInsets" -> {
+                afterProceed { hotseat ->
+                    hotseat?.hideLauncherSearchBar()
+                }
+            }
+
+            executable.declaringClass.name == "com.android.launcher3.Hotseat" -> {
+                afterProceed { hotseat ->
+                    hotseat?.hideLauncherSearchBar()
+                }
+            }
+
+            executable.declaringClass == Resources::class.java &&
+                executable.name == "getDimension" -> {
+                val resources = thisObject as Resources
+                val resId = getArg(0) as Int
+                if (resources.isLauncherQsbHeight(resId)) 0f else proceed()
+            }
+
+            executable.declaringClass == Resources::class.java &&
+                (executable.name == "getDimensionPixelOffset" || executable.name == "getDimensionPixelSize") -> {
+                val resources = thisObject as Resources
+                val resId = getArg(0) as Int
+                if (resources.isLauncherQsbHeight(resId)) 0 else proceed()
+            }
+
+            executable.declaringClass.name == "com.android.launcher3.touch.WorkspaceTouchListener" &&
+                executable.name == "onTouch" -> {
+                val result = proceed()
+                val event = getArg(1) as MotionEvent
+                val context = thisObject?.launcherTouchContext() ?: return@with result
+                handleDoubleTapToSleep(context, event)
+                result
+            }
+
+            executable.declaringClass.name == "com.android.server.policy.PhoneWindowManager" &&
+                executable.name == "init" -> {
+                proceed().also {
+                    (args.firstOrNull { it is Context } as? Context)
+                        ?.let(::registerLauncherSleepReceiver)
+                }
+            }
+
+            else -> UnhandledHotReloadHook
+        }
+    }
 
 private fun BroadcastReceiver.isTrustedLauncherSleepSender(context: Context): Boolean {
     val senderUid = attempt(-1) {

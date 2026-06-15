@@ -6,7 +6,9 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.widget.Toast
+import io.github.libxposed.api.XposedInterface.Chain
 import java.io.InputStream
+import java.lang.reflect.Executable
 import java.net.HttpURLConnection
 import java.net.URL
 import java.text.SimpleDateFormat
@@ -31,6 +33,27 @@ internal fun XpOmniModule.hookFludTrackerUpdater() {
         result
     }
 }
+
+internal fun XpOmniModule.handleFludHotReloadHook(
+    executable: Executable,
+    chain: Chain,
+): Any? {
+    if (executable.declaringClass != Application::class.java || executable.name != "attach") {
+        return UnhandledHotReloadHook
+    }
+
+    return with(chain) {
+        val result = proceed()
+        val baseContext = getArg(0) as Context
+        val context = baseContext.applicationContext ?: baseContext
+        FludTrackerUpdater.updateIfNeeded(context) { message, error ->
+            log(Log.ERROR, TAG, message, error)
+        }
+        result
+    }
+}
+
+internal fun isFludTrackerUpdaterIdle(): Boolean = !FludTrackerUpdater.isUpdating
 
 private object FludTrackerUpdater {
     private val SOURCES = arrayOf(
@@ -59,6 +82,9 @@ private object FludTrackerUpdater {
 
     @Volatile
     private var updating = false
+
+    val isUpdating: Boolean
+        get() = updating
 
     fun updateIfNeeded(context: Context, logError: (String, Throwable?) -> Unit) {
         val today = today()

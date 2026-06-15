@@ -7,6 +7,8 @@ import android.os.Build
 import android.util.Log
 import android.view.SurfaceControl
 import androidx.annotation.RequiresApi
+import io.github.libxposed.api.XposedInterface.Chain
+import java.lang.reflect.Executable
 import java.util.function.BiConsumer
 import java.util.function.BiPredicate
 
@@ -111,37 +113,42 @@ internal fun XpOmniModule.hookScreenCapture(classLoader: ClassLoader) {
         Build.VERSION.SDK_INT >= Build.VERSION_CODES.BAKLAVA &&
             Build.VERSION.SDK_INT_FULL >= Build.VERSION_CODES_FULL.BAKLAVA_1
 
-    val (screenCaptureClass, captureArgsClass) =
+    val screenCaptureClass =
         when {
             usesSecureContentPolicy -> {
-                classLoader.loadClass("android.window.ScreenCaptureInternal") to
-                    classLoader.loadClass("android.window.ScreenCaptureInternal\$CaptureArgs")
+                classLoader.loadClass("android.window.ScreenCaptureInternal")
             }
 
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE -> {
-                classLoader.loadClass("android.window.ScreenCapture") to
-                    classLoader.loadClass("android.window.ScreenCapture\$CaptureArgs")
+                classLoader.loadClass("android.window.ScreenCapture")
             }
 
             else -> {
-                SurfaceControl::class.java to
-                    classLoader.loadClass("android.view.SurfaceControl\$CaptureArgs")
+                SurfaceControl::class.java
             }
         }
 
-    val secureCaptureField = captureArgsClass
-        .getDeclaredField(if (usesSecureContentPolicy) "mSecureContentPolicy" else "mCaptureSecureLayers")
-        .apply { isAccessible = true }
-
     hookMethods(screenCaptureClass, "nativeCaptureDisplay", "nativeCaptureLayers") {
-        val captureArgs = getArg(0)
-        runCatching {
-            secureCaptureField.set(captureArgs, if (usesSecureContentPolicy) 1 else true)
-        }.onFailure { error ->
-            log(Log.ERROR, TAG, "ScreenCaptureHooker failed", error)
-        }
+        writeSecureCaptureFlag(getArg(0), usesSecureContentPolicy)
         proceed()
     }
+}
+
+private fun writeSecureCaptureFlag(
+    captureArgs: Any?,
+    usesSecureContentPolicy: Boolean,
+): Boolean {
+    if (captureArgs == null) return false
+    val fields =
+        if (usesSecureContentPolicy) {
+            arrayOf("mSecureContentPolicy" to 1, "mCaptureSecureLayers" to true)
+        } else {
+            arrayOf("mCaptureSecureLayers" to true, "mSecureContentPolicy" to 1)
+        }
+    for ((name, value) in fields) {
+        if (captureArgs.writeField(name, value)) return true
+    }
+    return false
 }
 
 internal fun XpOmniModule.hookDisplayControl(classLoader: ClassLoader) {
@@ -318,6 +325,108 @@ internal fun XpOmniModule.hookOneUI(classLoader: ClassLoader) {
         true
     }
 }
+
+internal fun XpOmniModule.handleScreenshotHotReloadHook(
+    executable: Executable,
+    chain: Chain,
+): Any? =
+    with(chain) {
+        when {
+            executable.declaringClass.name == "com.android.server.wm.WindowState" &&
+                executable.name == "isSecureLocked" -> {
+                val loader = executable.reloadClassLoader()
+                if (isCalledFromSurfaceCreation(loader, executable.declaringClass.classLoader)) {
+                    proceed()
+                } else {
+                    false
+                }
+            }
+
+            executable.name == "nativeCaptureDisplay" || executable.name == "nativeCaptureLayers" -> {
+                val usesSecureContentPolicy =
+                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.BAKLAVA &&
+                        Build.VERSION.SDK_INT_FULL >= Build.VERSION_CODES_FULL.BAKLAVA_1
+                writeSecureCaptureFlag(getArg(0), usesSecureContentPolicy)
+                proceed()
+            }
+
+            executable.name == "createVirtualDisplay" || executable.name == "createDisplay" -> {
+                val loader = executable.reloadClassLoader()
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE &&
+                    isCalledFromVirtualDisplayCreation(loader, executable.declaringClass.classLoader)
+                ) {
+                    return@with proceed()
+                }
+
+                val args = argsArray()
+                args[1] = true
+                proceed(args)
+            }
+
+            executable.declaringClass.name == "com.android.server.display.VirtualDisplayAdapter" &&
+                executable.name == "createVirtualDisplayLocked" -> {
+                val caller = getArg(2) as Int
+                if (caller >= APP_UID_START && getArg(1) == null) {
+                    return@with proceed()
+                }
+
+                for (index in 3 until args.size) {
+                    val flags = getArg(index) as? Int ?: continue
+                    val updatedArgs = argsArray()
+                    updatedArgs[index] = flags or DisplayManager.VIRTUAL_DISPLAY_FLAG_SECURE
+                    return@with proceed(updatedArgs)
+                }
+
+                log(Log.WARN, TAG, "flag not found in CreateVirtualDisplayLockedHooker")
+                proceed()
+            }
+
+            executable.declaringClass.name == "com.android.server.wm.ActivityTaskManagerService" &&
+                executable.name == "registerScreenCaptureObserver" -> null
+
+            executable.declaringClass.name == "com.android.server.wm.WindowManagerService" &&
+                executable.name == "registerScreenRecordingCallback" -> false
+
+            executable.declaringClass.name == "com.android.server.am.ActivityManagerService" &&
+                executable.name == "checkPermission" -> {
+                if (getArg(0) == CAPTURE_BLACKOUT_CONTENT_PERMISSION) {
+                    val args = argsArray()
+                    args[0] = READ_FRAME_BUFFER_PERMISSION
+                    proceed(args)
+                } else {
+                    proceed()
+                }
+            }
+
+            executable.declaringClass.name == "com.android.server.wm.WindowManagerServiceImpl" &&
+                executable.name == "notAllowCaptureDisplay" -> false
+
+            executable.name == "containsSecureLayers" &&
+                executable.declaringClass.name.endsWith("ScreenCapture\$ScreenshotHardwareBuffer") ||
+                executable.name == "containsSecureLayers" &&
+                executable.declaringClass.name.endsWith("SurfaceControl\$ScreenshotHardwareBuffer") -> false
+
+            executable.declaringClass.name == "com.oplus.screenshot.OplusScreenCapture\$CaptureArgs\$Builder" &&
+                executable.name == "setUid" -> {
+                val args = argsArray()
+                args[0] = -1L
+                proceed(args)
+            }
+
+            executable.declaringClass.name == "com.android.server.wm.OplusLongshotMainWindow" &&
+                executable.name == "hasSecure" -> false
+
+            executable.declaringClass.name == "com.android.server.wm.WmScreenshotController" &&
+                executable.name == "canBeScreenshotTarget" -> true
+
+            else -> UnhandledHotReloadHook
+        }
+    }
+
+private fun Executable.reloadClassLoader(): ClassLoader =
+    declaringClass.classLoader
+        ?: Thread.currentThread().contextClassLoader
+        ?: ClassLoader.getSystemClassLoader()
 
 private fun String.isSurfaceCreationMethod(): Boolean =
     this == "setInitialSurfaceControlProperties" || this == "createSurfaceLocked"

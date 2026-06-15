@@ -4,6 +4,8 @@ import android.annotation.SuppressLint
 import android.os.Build
 import android.util.Log
 import io.github.libxposed.api.XposedModule
+import io.github.libxposed.api.XposedModuleInterface.HotReloadedParam
+import io.github.libxposed.api.XposedModuleInterface.HotReloadingParam
 import io.github.libxposed.api.XposedModuleInterface.ModuleLoadedParam
 import io.github.libxposed.api.XposedModuleInterface.PackageReadyParam
 import io.github.libxposed.api.XposedModuleInterface.SystemServerStartingParam
@@ -12,6 +14,47 @@ import io.github.libxposed.api.XposedModuleInterface.SystemServerStartingParam
 class XpOmniModule : XposedModule() {
     override fun onModuleLoaded(param: ModuleLoadedParam) {
         log(Log.INFO, TAG, "Xpomni loaded")
+    }
+
+    override fun onHotReloading(param: HotReloadingParam): Boolean {
+        return runCatching {
+            if (!isFludTrackerUpdaterIdle()) {
+                log(Log.WARN, TAG, "hot reload rejected: Flud tracker update is running")
+                return false
+            }
+
+            val pixelState = pixelLauncherHotReloadState()
+            if (pixelState != null) {
+                runCatching {
+                    param.setSavedInstanceState(pixelState)
+                }.onFailure { error ->
+                    log(Log.ERROR, TAG, "hot reload rejected: failed to save Pixel Launcher state", error)
+                    return false
+                }
+            }
+
+            clearGitHubHotReloadState()
+            if (!releasePixelLauncherHotReloadState()) {
+                log(Log.ERROR, TAG, "hot reload rejected: failed to release Pixel Launcher state", null)
+                return false
+            }
+            true
+        }.getOrElse { error ->
+            log(Log.ERROR, TAG, "hot reload preparation failed", error)
+            false
+        }
+    }
+
+    override fun onHotReloaded(param: HotReloadedParam) {
+        runCatching {
+            restorePixelLauncherHotReloadState(param.savedInstanceState)
+            replaceHooksForHotReload(param.oldHookHandles)
+        }.onFailure { error ->
+            log(Log.ERROR, TAG, "hot reload finalization failed", error)
+            param.oldHookHandles.forEach { handle ->
+                runCatching { handle.unhook() }
+            }
+        }
     }
 
     override fun onSystemServerStarting(param: SystemServerStartingParam) {
@@ -130,9 +173,7 @@ class XpOmniModule : XposedModule() {
                 hookPixelLauncherFeatures(classLoader)
             }
 
-            else -> runCatching {
-                hookOnResume()
-            }
+            else -> Unit
         }
     }
 }

@@ -2,17 +2,15 @@
 
 package ka.xpomni
 
-import android.app.Activity
-import android.app.AlertDialog
 import android.os.Build
 import android.util.Log
 import io.github.libxposed.api.XposedInterface.Chain
+import io.github.libxposed.api.XposedInterface.HookHandle
 import io.github.libxposed.api.XposedInterface.Hooker
 import java.lang.reflect.Executable
 import java.lang.reflect.Field
 import java.lang.reflect.Method
 import java.util.concurrent.ConcurrentHashMap
-import kotlin.system.exitProcess
 
 internal const val TAG = "Xpomni"
 internal const val ANDROID_FRAMEWORK = "android"
@@ -35,6 +33,8 @@ internal val SHARE_SHEET_PACKAGE =
 
 private val fieldCache = ConcurrentHashMap<String, Field>()
 private val methodCache = ConcurrentHashMap<String, Method>()
+
+internal object UnhandledHotReloadHook
 
 internal fun XpOmniModule.runHook(
     name: String,
@@ -80,22 +80,69 @@ internal fun XpOmniModule.intercept(
     executable: Executable,
     block: Chain.() -> Any?,
 ) {
-    hook(executable).intercept(Hooker { chain -> chain.block() })
+    hook(executable)
+        .setId(executable.hookId())
+        .intercept(Hooker { chain -> chain.block() })
 }
 
-internal fun XpOmniModule.hookOnResume() {
-    val onResume = Activity::class.java.getDeclaredMethod("onResume")
+internal fun XpOmniModule.replaceHooksForHotReload(handles: List<HookHandle>) {
+    var replaced = 0
+    var removed = 0
+    for (handle in handles) {
+        val executable = runCatching { handle.executable }
+            .getOrElse { error ->
+                runCatching { handle.unhook() }
+                removed++
+                log(Log.ERROR, TAG, "hot reload hook missing executable", error)
+                continue
+            }
 
-    intercept(onResume) {
-        AlertDialog.Builder(thisObject as Activity)
-            .setTitle("Xpomni")
-            .setMessage("Incorrect module usage, remove this app from scope.")
-            .setCancelable(false)
-            .setPositiveButton("OK") { _, _ -> exitProcess(0) }
-            .show()
-        proceed()
+        val replacement = Hooker { chain ->
+            runCatching {
+                dispatchHotReloadHook(executable, chain)
+            }.getOrElse { error ->
+                log(Log.ERROR, TAG, "hot reloaded hook failed: ${executable.hookId()}", error)
+                chain.proceed()
+            }
+        }
+
+        runCatching {
+            handle.replaceHook(replacement)
+            replaced++
+        }.onFailure { error ->
+            runCatching { handle.unhook() }
+            removed++
+            log(Log.ERROR, TAG, "hot reload hook replacement failed: ${executable.hookId()}", error)
+        }
     }
+    log(Log.INFO, TAG, "hot reload replaced $replaced hooks, removed $removed hooks")
 }
+
+private fun XpOmniModule.dispatchHotReloadHook(
+    executable: Executable,
+    chain: Chain,
+): Any? {
+    handleBiometricHotReloadHook(executable, chain).handled { return it }
+    handleGitHubHotReloadHook(executable, chain).handled { return it }
+    handleFludHotReloadHook(executable, chain).handled { return it }
+    handleShareSheetHotReloadHook(executable, chain).handled { return it }
+    handleScreenshotHotReloadHook(executable, chain).handled { return it }
+    handlePixelLauncherHotReloadHook(executable, chain).handled { return it }
+    log(Log.WARN, TAG, "hot reload hook missing dispatcher: ${executable.hookId()}")
+    return chain.proceed()
+}
+
+private inline fun Any?.handled(block: (Any?) -> Unit) {
+    if (this !== UnhandledHotReloadHook) block(this)
+}
+
+private fun Executable.hookId(): String =
+    declaringClass.name +
+        "#" +
+        name +
+        "(" +
+        parameterTypes.joinToString(",") { it.name } +
+        ")"
 
 internal fun Chain.afterProceed(action: (Any?) -> Unit): Any? {
     val result = proceed()

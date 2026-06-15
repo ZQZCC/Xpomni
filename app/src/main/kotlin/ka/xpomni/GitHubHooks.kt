@@ -7,7 +7,9 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import io.github.libxposed.api.XposedInterface.Chain
 import java.lang.ref.WeakReference
+import java.lang.reflect.Executable
 import java.lang.reflect.Method
 import java.lang.reflect.Modifier
 
@@ -19,6 +21,10 @@ private const val GITHUB_VERIFICATION_APPROVED = "FINISHED_APPROVED"
 
 @Volatile
 private var pendingGitHubVerificationActivity: WeakReference<Activity>? = null
+
+internal fun clearGitHubHotReloadState() {
+    pendingGitHubVerificationActivity = null
+}
 
 internal fun XpOmniModule.hookGitHubFastPass(classLoader: ClassLoader) {
     val dialogClass = classLoader.loadClass(GITHUB_TWO_FACTOR_DIALOG)
@@ -55,6 +61,41 @@ internal fun XpOmniModule.hookGitHubFastPass(classLoader: ClassLoader) {
 
     log(Log.INFO, TAG, "hooked GitHub FastPass")
 }
+
+internal fun XpOmniModule.handleGitHubHotReloadHook(
+    executable: Executable,
+    chain: Chain,
+): Any? =
+    with(chain) {
+        when {
+            executable.declaringClass.name == GITHUB_TWO_FACTOR_ACTIVITY &&
+                executable.name == "onCreate" -> {
+                proceed().also {
+                    pendingGitHubVerificationActivity = WeakReference(thisObject as Activity)
+                }
+            }
+
+            executable.declaringClass.name == GITHUB_TWO_FACTOR_DIALOG &&
+                executable.parameterCount == 1 &&
+                (executable as? Method)?.returnType?.isEnum == true -> {
+                val result = proceed()
+                val state = result as? Enum<*> ?: return@with result
+                if (state.name != GITHUB_VERIFICATION_APPROVED) return@with result
+
+                val activity = pendingGitHubVerificationActivity
+                    ?.get()
+                    ?.takeUnless { it.isFinishing || it.isDestroyed }
+                    ?: return@with result
+
+                pendingGitHubVerificationActivity = null
+                Handler(Looper.getMainLooper()).post { activity.finish() }
+                log(Log.INFO, TAG, "dismissed GitHub verification dialog")
+                result
+            }
+
+            else -> UnhandledHotReloadHook
+        }
+    }
 
 private fun Class<*>.findEnumState(name: String): Class<*>? =
     declaredClasses.firstOrNull { candidate ->

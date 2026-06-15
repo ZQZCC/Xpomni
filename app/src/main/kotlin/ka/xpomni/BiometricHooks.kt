@@ -5,6 +5,8 @@ package ka.xpomni
 import android.util.Log
 import android.view.View
 import android.widget.Button
+import io.github.libxposed.api.XposedInterface.Chain
+import java.lang.reflect.Executable
 
 private const val BIOMETRIC_TARGET_CLASS = "com.android.systemui.biometrics.AuthContainerView"
 private const val BIOMETRIC_TARGET_METHOD = "onDialogAnimatedIn"
@@ -47,6 +49,37 @@ private fun XpOmniModule.hookBiometricBypass(classLoader: ClassLoader) {
     }
 
     log(Log.INFO, TAG, "Hooked $BIOMETRIC_TARGET_METHOD in $BIOMETRIC_TARGET_CLASS")
+}
+
+internal fun XpOmniModule.handleBiometricHotReloadHook(
+    executable: Executable,
+    chain: Chain,
+): Any? {
+    if (executable.declaringClass.name != BIOMETRIC_TARGET_CLASS ||
+        executable.name != BIOMETRIC_TARGET_METHOD
+    ) {
+        return UnhandledHotReloadHook
+    }
+
+    return with(chain) {
+        val result = proceed()
+        (thisObject as? View)?.let { authContainerView ->
+            val context = authContainerView.context
+            val confirmButtonId = context.resources.getIdentifier(
+                BIOMETRIC_BUTTON_CONFIRM_ID,
+                "id",
+                context.packageName,
+            )
+            scheduleBiometricConfirmClick(
+                parentView = authContainerView,
+                buttonId = confirmButtonId,
+                opPackageName = authContainerView.biometricOpPackageName(),
+                attempt = 0,
+                delayMs = BIOMETRIC_INITIAL_DELAY_MS,
+            )
+        }
+        result
+    }
 }
 
 private fun View.biometricOpPackageName(): String =

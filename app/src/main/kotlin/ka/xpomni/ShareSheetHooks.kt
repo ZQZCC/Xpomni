@@ -6,6 +6,8 @@ import android.app.ActivityManager
 import android.content.IntentFilter
 import android.content.pm.ShortcutManager
 import android.util.Log
+import io.github.libxposed.api.XposedInterface.Chain
+import java.lang.reflect.Executable
 
 internal fun XpOmniModule.hookHideDirectShare(classLoader: ClassLoader) {
     runHook("hook DirectShare low-ram") {
@@ -56,3 +58,22 @@ internal fun XpOmniModule.hookShareTargets() {
 
     log(Log.INFO, TAG, "hooked DirectShare share-targets")
 }
+
+internal fun XpOmniModule.handleShareSheetHotReloadHook(
+    executable: Executable,
+    chain: Chain,
+): Any? =
+    with(chain) {
+        when {
+            executable.declaringClass == ActivityManager::class.java &&
+                executable.name == "isLowRamDeviceStatic" -> true
+
+            executable.declaringClass.name == "com.android.intentresolver.ChooserListAdapter" &&
+                executable.name == "getServiceTargetCount" -> 0
+
+            executable.declaringClass == ShortcutManager::class.java &&
+                executable.name == "getShareTargets" -> emptyList<Any>()
+
+            else -> UnhandledHotReloadHook
+        }
+    }

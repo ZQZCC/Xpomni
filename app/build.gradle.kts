@@ -122,8 +122,8 @@ android {
         applicationId = "ka.xpomni"
         minSdk = appMinSdk
         targetSdk = 36
-        versionCode = 4
-        versionName = "1.0.3"
+        versionCode = 8
+        versionName = "1.0.7"
     }
 
     signingConfigs {
@@ -187,7 +187,7 @@ android {
 
 dependencies {
     compileOnly("androidx.annotation:annotation:1.9.1")
-    compileOnly("io.github.libxposed:api:101.0.1")
+    compileOnly("io.github.libxposed:api:102.0.0")
 }
 
 tasks.register("stripReleaseDexDebugInfo") {
