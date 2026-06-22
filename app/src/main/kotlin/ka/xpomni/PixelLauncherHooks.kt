@@ -7,6 +7,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.res.Resources
+import android.graphics.Insets
 import android.os.Build
 import android.os.SystemClock
 import android.os.VibrationEffect
@@ -14,6 +15,7 @@ import android.os.VibratorManager
 import android.util.Log
 import android.view.MotionEvent
 import android.view.View
+import android.view.WindowManager
 import io.github.libxposed.api.XposedInterface.Chain
 import java.lang.reflect.Executable
 import java.lang.reflect.Method
@@ -23,6 +25,7 @@ import kotlin.math.hypot
 private const val DOUBLE_TAP_TIMEOUT = 400L
 private const val TAP_DISTANCE_THRESHOLD = 50f
 private const val QSB_WIDGET_HEIGHT = "qsb_widget_height"
+private const val TASKBAR_ACTIVITY_CONTEXT = "com.android.launcher3.taskbar.TaskbarActivityContext"
 private const val SLEEP_ACTION = "ka.xpomni.action.PIXEL_LAUNCHER_SLEEP"
 private const val SLEEP_TOKEN_EXTRA = "ka.xpomni.extra.SLEEP_TOKEN"
 private const val SLEEP_TOKEN = "xpomni_pixel_launcher_sleep"
@@ -69,6 +72,12 @@ internal fun XpOmniModule.hookPixelLauncherFeatures(classLoader: ClassLoader) {
     }
     runOptionalHook("hook Pixel Launcher double tap sleep") {
         hookPixelDoubleTapSleep(classLoader)
+    }
+    runOptionalHook("hook Pixel Launcher navbar pill") {
+        hookPixelLauncherNavbarPill(classLoader)
+    }
+    runOptionalHook("hook Pixel Launcher navbar insets") {
+        hookPixelLauncherNavbarInsets(classLoader)
     }
 }
 
@@ -167,6 +176,29 @@ private fun XpOmniModule.hookPixelDoubleTapSleep(classLoader: ClassLoader) {
     }
 
     log(Log.INFO, TAG, "hooked Pixel Launcher double tap sleep")
+}
+
+private fun XpOmniModule.hookPixelLauncherNavbarPill(classLoader: ClassLoader) {
+    val taskbarActivityContextClass = classLoader.loadClass(TASKBAR_ACTIVITY_CONTEXT)
+
+    hookMethods(taskbarActivityContextClass, "init") {
+        afterProceed { taskbarContext ->
+            taskbarContext?.hideLauncherNavbarPill()
+        }
+    }
+
+    log(Log.INFO, TAG, "hooked Pixel Launcher navbar pill")
+}
+
+private fun XpOmniModule.hookPixelLauncherNavbarInsets(classLoader: ClassLoader) {
+    val taskbarActivityContextClass = classLoader.loadClass(TASKBAR_ACTIVITY_CONTEXT)
+
+    hookMethods(taskbarActivityContextClass, "notifyUpdateLayoutParams") {
+        thisObject?.hideLauncherNavbarInsets()
+        proceed()
+    }
+
+    log(Log.INFO, TAG, "hooked Pixel Launcher navbar insets")
 }
 
 internal fun XpOmniModule.hookLauncherSleepReceiver(classLoader: ClassLoader) {
@@ -301,7 +333,8 @@ internal fun XpOmniModule.handlePixelLauncherHotReloadHook(
             }
 
             executable.declaringClass == Resources::class.java &&
-                (executable.name == "getDimensionPixelOffset" || executable.name == "getDimensionPixelSize") -> {
+                (executable.name == "getDimensionPixelOffset" ||
+                    executable.name == "getDimensionPixelSize") -> {
                 val resources = thisObject as Resources
                 val resId = getArg(0) as Int
                 if (resources.isLauncherQsbHeight(resId)) 0 else proceed()
@@ -314,6 +347,19 @@ internal fun XpOmniModule.handlePixelLauncherHotReloadHook(
                 val context = thisObject?.launcherTouchContext() ?: return@with result
                 handleDoubleTapToSleep(context, event)
                 result
+            }
+
+            executable.declaringClass.name == TASKBAR_ACTIVITY_CONTEXT &&
+                executable.name == "init" -> {
+                afterProceed { taskbarContext ->
+                    taskbarContext?.hideLauncherNavbarPill()
+                }
+            }
+
+            executable.declaringClass.name == TASKBAR_ACTIVITY_CONTEXT &&
+                executable.name == "notifyUpdateLayoutParams" -> {
+                thisObject?.hideLauncherNavbarInsets()
+                proceed()
             }
 
             executable.declaringClass.name == "com.android.server.policy.PhoneWindowManager" &&
@@ -443,6 +489,39 @@ private fun Any.hideLauncherSearchBar() {
         layoutParams = layoutParams?.apply {
             height = 0
         }
+    }
+}
+
+private fun Any.hideLauncherNavbarPill() {
+    readField("mControllers")
+        ?.readField("stashedHandleViewController")
+        ?.writeField("mStashedHandleWidth", 0)
+}
+
+private fun Any.hideLauncherNavbarInsets() {
+    val layoutParams = readField("mWindowLayoutParams") as? WindowManager.LayoutParams ?: return
+    layoutParams.clearNavigationBarInsets()
+
+    val rotationParams = layoutParams.readField("paramsForRotation") ?: return
+    val length = attempt(0) { java.lang.reflect.Array.getLength(rotationParams) }
+    repeat(length) { index ->
+        val rotationLayoutParams = attempt(null) {
+            java.lang.reflect.Array.get(rotationParams, index)
+        } as? WindowManager.LayoutParams ?: return@repeat
+        rotationLayoutParams.clearNavigationBarInsets()
+    }
+}
+
+private fun WindowManager.LayoutParams.clearNavigationBarInsets() {
+    val providedInsets = readField("providedInsets") ?: return
+    val length = attempt(0) { java.lang.reflect.Array.getLength(providedInsets) }
+    repeat(length) { index ->
+        val insetsFrame = attempt(null) {
+            java.lang.reflect.Array.get(providedInsets, index)
+        } ?: return@repeat
+        if (!insetsFrame.toString().contains("type=navigationBars")) return@repeat
+
+        insetsFrame.invokeMethod("setInsetsSize", Insets.NONE)
     }
 }
 

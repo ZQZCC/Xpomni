@@ -1,6 +1,8 @@
 import java.io.BufferedOutputStream
 import java.io.FileOutputStream
 import java.security.MessageDigest
+import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
 import java.util.Locale
 import java.util.Properties
 import java.util.zip.Adler32
@@ -122,8 +124,8 @@ android {
         applicationId = "ka.xpomni"
         minSdk = appMinSdk
         targetSdk = 36
-        versionCode = 8
-        versionName = "1.0.7"
+        versionCode = 10
+        versionName = "1.1.0"
     }
 
     signingConfigs {
@@ -326,6 +328,14 @@ tasks.register("stripReleaseDexDebugInfo") {
         providers.exec {
             commandLine(signCommand)
         }.result.get().assertNormalExitValue()
+
+        val versionName = android.defaultConfig.versionName ?: "dev"
+        val versionCode = android.defaultConfig.versionCode ?: 0
+        val timestamp = DateTimeFormatter
+            .ofPattern("yyyyMMdd-HHmmss")
+            .format(LocalDateTime.now())
+        val namedApk = apk.parentFile.resolve("Xpomni-v$versionName-$versionCode-$timestamp.apk")
+        apk.copyTo(namedApk, overwrite = true)
 
         delete(layout.buildDirectory.dir("outputs/mapping/release"))
     }

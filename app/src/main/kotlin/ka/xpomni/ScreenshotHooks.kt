@@ -3,12 +3,16 @@
 package ka.xpomni
 
 import android.hardware.display.DisplayManager
+import android.media.MediaPlayer
 import android.os.Build
 import android.util.Log
 import android.view.SurfaceControl
 import androidx.annotation.RequiresApi
 import io.github.libxposed.api.XposedInterface.Chain
+import java.lang.reflect.Constructor
 import java.lang.reflect.Executable
+import java.util.concurrent.AbstractExecutorService
+import java.util.concurrent.TimeUnit
 import java.util.function.BiConsumer
 import java.util.function.BiPredicate
 
@@ -16,6 +20,13 @@ private const val SYNTHETIC_CLASS_SCAN_LIMIT = 20
 private const val APP_UID_START = 10_000
 private const val CAPTURE_BLACKOUT_CONTENT_PERMISSION = "android.permission.CAPTURE_BLACKOUT_CONTENT"
 private const val READ_FRAME_BUFFER_PERMISSION = "android.permission.READ_FRAME_BUFFER"
+private const val SYSTEMUI_SCREENSHOT_PACKAGE = "com.android.systemui.screenshot"
+private const val TAKE_SCREENSHOT_EXECUTOR_IMPL =
+    "com.android.systemui.screenshot.TakeScreenshotExecutorImpl"
+private const val SCREENSHOT_SOUND_CONTROLLER_IMPL =
+    "com.android.systemui.screenshot.ScreenshotSoundControllerImpl"
+private const val EXECUTOR_COROUTINE_DISPATCHER_IMPL =
+    "kotlinx.coroutines.ExecutorCoroutineDispatcherImpl"
 
 internal fun XpOmniModule.hookScreenshotHardwareBufferIfPresent(classLoader: ClassLoader) {
     runOptionalHook("hook ScreenshotHardwareBuffer") {
@@ -149,6 +160,48 @@ private fun writeSecureCaptureFlag(
         if (captureArgs.writeField(name, value)) return true
     }
     return false
+}
+
+internal fun XpOmniModule.hookSystemUiScreenshotMute(classLoader: ClassLoader) {
+    hookScreenshotMediaPlayerStart()
+
+    runOptionalHook("hook screenshot sound dispatcher") {
+        hookScreenshotSoundDispatcher(classLoader)
+    }
+
+    runOptionalHook("hook screenshot sound constructor") {
+        hookScreenshotSoundConstructor(classLoader)
+    }
+}
+
+private fun XpOmniModule.hookScreenshotMediaPlayerStart() {
+    val start = MediaPlayer::class.java.getDeclaredMethod("start")
+
+    intercept(start) {
+        if (isCalledFromSystemUiScreenshot()) {
+            null
+        } else {
+            proceed()
+        }
+    }
+}
+
+private fun XpOmniModule.hookScreenshotSoundDispatcher(classLoader: ClassLoader) {
+    val takeScreenshotExecutorClass = classLoader.loadClass(TAKE_SCREENSHOT_EXECUTOR_IMPL)
+
+    hookMethods(takeScreenshotExecutorClass, "getScreenshotController") {
+        proceed().also { controller ->
+            controller.replaceScreenshotSoundDispatcher(classLoader)
+        }
+    }
+}
+
+private fun XpOmniModule.hookScreenshotSoundConstructor(classLoader: ClassLoader) {
+    val screenshotSoundControllerClass = classLoader.loadClass(SCREENSHOT_SOUND_CONTROLLER_IMPL)
+
+    hookConstructors(screenshotSoundControllerClass) {
+        proceedWithNoOpDispatcherArg(classLoader)
+    }
 }
 
 internal fun XpOmniModule.hookDisplayControl(classLoader: ClassLoader) {
@@ -342,7 +395,8 @@ internal fun XpOmniModule.handleScreenshotHotReloadHook(
                 }
             }
 
-            executable.name == "nativeCaptureDisplay" || executable.name == "nativeCaptureLayers" -> {
+            executable.name == "nativeCaptureDisplay" ||
+                executable.name == "nativeCaptureLayers" -> {
                 val usesSecureContentPolicy =
                     Build.VERSION.SDK_INT >= Build.VERSION_CODES.BAKLAVA &&
                         Build.VERSION.SDK_INT_FULL >= Build.VERSION_CODES_FULL.BAKLAVA_1
@@ -350,7 +404,25 @@ internal fun XpOmniModule.handleScreenshotHotReloadHook(
                 proceed()
             }
 
-            executable.name == "createVirtualDisplay" || executable.name == "createDisplay" -> {
+            executable.declaringClass == MediaPlayer::class.java &&
+                executable.name == "start" -> {
+                if (isCalledFromSystemUiScreenshot()) null else proceed()
+            }
+
+            executable.declaringClass.name == TAKE_SCREENSHOT_EXECUTOR_IMPL &&
+                executable.name == "getScreenshotController" -> {
+                proceed().also { controller ->
+                    controller.replaceScreenshotSoundDispatcher(executable.reloadClassLoader())
+                }
+            }
+
+            executable is Constructor<*> &&
+                executable.declaringClass.name == SCREENSHOT_SOUND_CONTROLLER_IMPL -> {
+                proceedWithNoOpDispatcherArg(executable.reloadClassLoader())
+            }
+
+            executable.name == "createVirtualDisplay" ||
+                executable.name == "createDisplay" -> {
                 val loader = executable.reloadClassLoader()
                 if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE &&
                     isCalledFromVirtualDisplayCreation(loader, executable.declaringClass.classLoader)
@@ -402,9 +474,10 @@ internal fun XpOmniModule.handleScreenshotHotReloadHook(
                 executable.name == "notAllowCaptureDisplay" -> false
 
             executable.name == "containsSecureLayers" &&
-                executable.declaringClass.name.endsWith("ScreenCapture\$ScreenshotHardwareBuffer") ||
-                executable.name == "containsSecureLayers" &&
-                executable.declaringClass.name.endsWith("SurfaceControl\$ScreenshotHardwareBuffer") -> false
+                (
+                    executable.declaringClass.name.endsWith("ScreenCapture\$ScreenshotHardwareBuffer") ||
+                        executable.declaringClass.name.endsWith("SurfaceControl\$ScreenshotHardwareBuffer")
+                    ) -> false
 
             executable.declaringClass.name == "com.oplus.screenshot.OplusScreenCapture\$CaptureArgs\$Builder" &&
                 executable.name == "setUid" -> {
@@ -430,3 +503,55 @@ private fun Executable.reloadClassLoader(): ClassLoader =
 
 private fun String.isSurfaceCreationMethod(): Boolean =
     this == "setInitialSurfaceControlProperties" || this == "createSurfaceLocked"
+
+private fun isCalledFromSystemUiScreenshot(): Boolean =
+    Throwable().stackTrace.any { frame ->
+        frame.className.startsWith(SYSTEMUI_SCREENSHOT_PACKAGE)
+    }
+
+private fun Any?.replaceScreenshotSoundDispatcher(classLoader: ClassLoader) {
+    val dispatcher = classLoader.newNoOpCoroutineDispatcherOrNull() ?: return
+    this
+        ?.readField("screenshotSoundController")
+        ?.writeField("bgDispatcher", dispatcher)
+}
+
+private fun Chain.proceedWithNoOpDispatcherArg(classLoader: ClassLoader): Any? {
+    val updatedArgs = argsArray()
+    val dispatcherIndex = updatedArgs.indexOfFirst { arg ->
+        arg?.javaClass?.name?.contains("dispatcher", ignoreCase = true) == true
+    }
+    if (dispatcherIndex < 0) return proceed()
+
+    val dispatcher = classLoader.newNoOpCoroutineDispatcherOrNull() ?: return proceed()
+    updatedArgs[dispatcherIndex] = dispatcher
+    return proceed(updatedArgs)
+}
+
+private fun ClassLoader.newNoOpCoroutineDispatcherOrNull(): Any? =
+    runCatching {
+        val dispatcherClass = loadClass(EXECUTOR_COROUTINE_DISPATCHER_IMPL)
+        val constructor = dispatcherClass.declaredConstructors
+            .firstOrNull { it.parameterCount == 1 }
+            ?.apply { isAccessible = true }
+            ?: return@runCatching null
+
+        constructor.newInstance(NoOpExecutorService)
+    }.getOrNull()
+
+private object NoOpExecutorService : AbstractExecutorService() {
+    override fun shutdown() = Unit
+
+    override fun shutdownNow(): MutableList<Runnable> = mutableListOf()
+
+    override fun isShutdown(): Boolean = false
+
+    override fun isTerminated(): Boolean = false
+
+    override fun awaitTermination(
+        timeout: Long,
+        unit: TimeUnit,
+    ): Boolean = false
+
+    override fun execute(command: Runnable) = Unit
+}

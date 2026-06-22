@@ -57,11 +57,8 @@ internal fun isFludTrackerUpdaterIdle(): Boolean = !FludTrackerUpdater.isUpdatin
 
 private object FludTrackerUpdater {
     private val SOURCES = arrayOf(
-        "https://trackerslist.com/best.txt",
-        "https://newtrackon.com/api/all",
         "http://github.itzmx.com/1265578519/OpenTracker/master/tracker.txt",
-        "https://raw.githubusercontent.com/DeSireFire/animeTrackerList/master/AT_best.txt",
-        "https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_best.txt",
+        "https://down.adysec.com/trackers_best.txt",
     )
 
     private const val PREFS = "xpomni_flud_tracker"
@@ -86,15 +83,23 @@ private object FludTrackerUpdater {
     val isUpdating: Boolean
         get() = updating
 
-    fun updateIfNeeded(context: Context, logError: (String, Throwable?) -> Unit) {
+    fun updateIfNeeded(
+        context: Context,
+        logError: (String, Throwable?) -> Unit,
+    ) {
         val today = today()
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        if (prefs.getString(KEY_LAST_DAY, null) != today || prefs.getInt(KEY_LAST_VERSION, 0) != UPDATER_VERSION) {
+        if (prefs.getString(KEY_LAST_DAY, null) != today ||
+            prefs.getInt(KEY_LAST_VERSION, 0) != UPDATER_VERSION
+        ) {
             updateNow(context, logError)
         }
     }
 
-    private fun updateNow(context: Context, logError: (String, Throwable?) -> Unit) {
+    private fun updateNow(
+        context: Context,
+        logError: (String, Throwable?) -> Unit,
+    ) {
         val appContext = context.applicationContext ?: context
         if (updating) {
             toast(appContext, TOAST_UPDATING)
@@ -146,7 +151,10 @@ private object FludTrackerUpdater {
         return UpdateResult(trackers.toList(), failureCount)
     }
 
-    private fun parseTrackers(text: String, output: MutableSet<String>) {
+    private fun parseTrackers(
+        text: String,
+        output: MutableSet<String>,
+    ) {
         text.lineSequence()
             .map { it.trim() }
             .filter { it.isNotEmpty() && !it.startsWith("#") }
@@ -191,20 +199,28 @@ private object FludTrackerUpdater {
         }
     }
 
-    private fun writeDefaultTrackers(context: Context, trackers: List<String>) {
-        context.openFileOutput(TRACKERS_FILE, Context.MODE_PRIVATE).bufferedWriter(Charsets.UTF_8).use { writer ->
-            trackers.forEach { tracker ->
-                writer.write(tracker)
-                writer.newLine()
+    private fun writeDefaultTrackers(
+        context: Context,
+        trackers: List<String>,
+    ) {
+        context.openFileOutput(TRACKERS_FILE, Context.MODE_PRIVATE)
+            .bufferedWriter(Charsets.UTF_8)
+            .use { writer ->
+                trackers.forEach { tracker ->
+                    writer.write(tracker)
+                    writer.newLine()
+                }
             }
-        }
     }
 
     private fun today(): String {
         return SimpleDateFormat("yyyyMMdd", Locale.US).format(Date())
     }
 
-    private fun toast(context: Context, text: String) {
+    private fun toast(
+        context: Context,
+        text: String,
+    ) {
         mainHandler.post {
             Toast.makeText(context, text, Toast.LENGTH_SHORT).show()
         }

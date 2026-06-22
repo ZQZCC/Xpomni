@@ -141,6 +141,21 @@ class XpOmniModule : XposedModule() {
             SYSTEMUI, MIUI_SCREENSHOT -> {
                 if (packageName == SYSTEMUI) {
                     runBiometricHook(classLoader)
+                    runHook("hook SystemUI screenshot mute") {
+                        hookSystemUiScreenshotMute(classLoader)
+                    }
+                    runOptionalHook("hook keyguard charging info") {
+                        hookKeyguardChargingInfo(classLoader)
+                    }
+                    runOptionalHook("hook keyguard carrier text") {
+                        hookKeyguardCarrierText(classLoader)
+                    }
+                    runOptionalHook("hook quick settings tile rows") {
+                        hookQuickSettingsTileRows()
+                    }
+                    runOptionalHook("hook status bar traffic indicator") {
+                        hookStatusBarTrafficIndicator(classLoader)
+                    }
                 }
                 hookScreenCaptureInPackage(classLoader, packageName)
             }

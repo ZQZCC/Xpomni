@@ -127,6 +127,9 @@ private fun XpOmniModule.dispatchHotReloadHook(
     handleFludHotReloadHook(executable, chain).handled { return it }
     handleShareSheetHotReloadHook(executable, chain).handled { return it }
     handleScreenshotHotReloadHook(executable, chain).handled { return it }
+    handleKeyguardHotReloadHook(executable, chain).handled { return it }
+    handleQuickSettingsHotReloadHook(executable, chain).handled { return it }
+    handleStatusBarTrafficHotReloadHook(executable, chain).handled { return it }
     handlePixelLauncherHotReloadHook(executable, chain).handled { return it }
     log(Log.WARN, TAG, "hot reload hook missing dispatcher: ${executable.hookId()}")
     return chain.proceed()
