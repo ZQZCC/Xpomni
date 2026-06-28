@@ -42,6 +42,9 @@ private const val STATUS_BAR_LEFT_CLOCK_END_PADDING = "status_bar_left_clock_end
 
 @Volatile
 private var trafficIndicatorRef: WeakReference<StatusBarTrafficView>? = null
+private val trafficFormat0_00 = DecimalFormat("0.00")
+private val trafficFormat00_0 = DecimalFormat("00.0")
+private val trafficFormat000 = DecimalFormat("000")
 
 internal fun XpOmniModule.hookStatusBarTrafficIndicator(classLoader: ClassLoader) {
     val controllerClass = classLoader.loadClass(PHONE_STATUS_BAR_VIEW_CONTROLLER)
@@ -287,25 +290,25 @@ private fun formatPixelXpertTrafficText(bytesPerSecond: Long): SpannableStringBu
     val (formattedData, unit) =
         when {
             bitsPerSecond >= GIGA ->
-                DecimalFormat("0.00").format(bitsPerSecond / GIGA.toFloat()) to "Gb"
+                trafficFormat0_00.format(bitsPerSecond / GIGA.toFloat()) to "Gb"
 
             bitsPerSecond >= 100 * MEGA ->
-                DecimalFormat("000").format(bitsPerSecond / MEGA.toFloat()) to "Mb"
+                trafficFormat000.format(bitsPerSecond / MEGA.toFloat()) to "Mb"
 
             bitsPerSecond >= 10 * MEGA ->
-                DecimalFormat("00.0").format(bitsPerSecond / MEGA.toFloat()) to "Mb"
+                trafficFormat00_0.format(bitsPerSecond / MEGA.toFloat()) to "Mb"
 
             bitsPerSecond >= MEGA ->
-                DecimalFormat("0.00").format(bitsPerSecond / MEGA.toFloat()) to "Mb"
+                trafficFormat0_00.format(bitsPerSecond / MEGA.toFloat()) to "Mb"
 
             bitsPerSecond >= 100 * KILO ->
-                DecimalFormat("000").format(bitsPerSecond / KILO.toFloat()) to "Kb"
+                trafficFormat000.format(bitsPerSecond / KILO.toFloat()) to "Kb"
 
             bitsPerSecond >= 10 * KILO ->
-                DecimalFormat("00.0").format(bitsPerSecond / KILO.toFloat()) to "Kb"
+                trafficFormat00_0.format(bitsPerSecond / KILO.toFloat()) to "Kb"
 
             else ->
-                DecimalFormat("0.00").format(bitsPerSecond / KILO.toFloat()) to "Kb"
+                trafficFormat0_00.format(bitsPerSecond / KILO.toFloat()) to "Kb"
         }
 
     val unitString = SpannableString(unit + TRAFFIC_SYMBOL).apply {

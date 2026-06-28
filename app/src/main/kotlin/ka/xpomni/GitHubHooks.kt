@@ -21,6 +21,7 @@ private const val GITHUB_VERIFICATION_APPROVED = "FINISHED_APPROVED"
 
 @Volatile
 private var pendingGitHubVerificationActivity: WeakReference<Activity>? = null
+private val githubMainHandler = Handler(Looper.getMainLooper())
 
 internal fun clearGitHubHotReloadState() {
     pendingGitHubVerificationActivity = null
@@ -48,14 +49,7 @@ internal fun XpOmniModule.hookGitHubFastPass(classLoader: ClassLoader) {
         val state = result as? Enum<*> ?: return@intercept result
         if (state.name != GITHUB_VERIFICATION_APPROVED) return@intercept result
 
-        val activity = pendingGitHubVerificationActivity
-            ?.get()
-            ?.takeUnless { it.isFinishing || it.isDestroyed }
-            ?: return@intercept result
-
-        pendingGitHubVerificationActivity = null
-        Handler(Looper.getMainLooper()).post { activity.finish() }
-        log(Log.INFO, TAG, "dismissed GitHub verification dialog")
+        dismissPendingGitHubVerification()
         result
     }
 
@@ -82,20 +76,24 @@ internal fun XpOmniModule.handleGitHubHotReloadHook(
                 val state = result as? Enum<*> ?: return@with result
                 if (state.name != GITHUB_VERIFICATION_APPROVED) return@with result
 
-                val activity = pendingGitHubVerificationActivity
-                    ?.get()
-                    ?.takeUnless { it.isFinishing || it.isDestroyed }
-                    ?: return@with result
-
-                pendingGitHubVerificationActivity = null
-                Handler(Looper.getMainLooper()).post { activity.finish() }
-                log(Log.INFO, TAG, "dismissed GitHub verification dialog")
+                dismissPendingGitHubVerification()
                 result
             }
 
             else -> UnhandledHotReloadHook
         }
     }
+
+private fun XpOmniModule.dismissPendingGitHubVerification() {
+    val activity = pendingGitHubVerificationActivity
+        ?.get()
+        ?.takeUnless { it.isFinishing || it.isDestroyed }
+        ?: return
+
+    pendingGitHubVerificationActivity = null
+    githubMainHandler.post { activity.finish() }
+    log(Log.INFO, TAG, "dismissed GitHub verification dialog")
+}
 
 private fun Class<*>.findEnumState(name: String): Class<*>? =
     declaredClasses.firstOrNull { candidate ->

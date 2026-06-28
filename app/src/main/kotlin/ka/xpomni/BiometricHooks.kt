@@ -3,16 +3,23 @@
 package ka.xpomni
 
 import android.util.Log
+import android.os.SystemClock
 import android.view.View
 import android.widget.Button
 import io.github.libxposed.api.XposedInterface.Chain
 import java.lang.reflect.Executable
+import java.lang.reflect.Field
 
 private const val BIOMETRIC_TARGET_CLASS = "com.android.systemui.biometrics.AuthContainerView"
 private const val BIOMETRIC_TARGET_METHOD = "onDialogAnimatedIn"
 private const val BIOMETRIC_BUTTON_CONFIRM_ID = "button_confirm"
-private const val BIOMETRIC_MAX_RETRIES = 3
-private const val BIOMETRIC_INITIAL_DELAY_MS = 100L
+private const val BIOMETRIC_MAX_WAIT_MS = 1_500L
+
+private var biometricConfigField: Field? = null
+private var biometricOpPackageNameField: Field? = null
+
+@Volatile
+private var biometricConfirmButtonId = 0
 
 internal fun XpOmniModule.runBiometricHook(classLoader: ClassLoader) {
     runCatching {
@@ -27,23 +34,12 @@ internal fun XpOmniModule.runBiometricHook(classLoader: ClassLoader) {
 private fun XpOmniModule.hookBiometricBypass(classLoader: ClassLoader) {
     val authContainerViewClass = classLoader.loadClass(BIOMETRIC_TARGET_CLASS)
     val onDialogAnimatedIn = authContainerViewClass.getDeclaredMethod(BIOMETRIC_TARGET_METHOD)
+    cacheBiometricFields(authContainerViewClass)
 
     intercept(onDialogAnimatedIn) {
         val result = proceed()
         (thisObject as? View)?.let { authContainerView ->
-            val context = authContainerView.context
-            val confirmButtonId = context.resources.getIdentifier(
-                BIOMETRIC_BUTTON_CONFIRM_ID,
-                "id",
-                context.packageName,
-            )
-            scheduleBiometricConfirmClick(
-                parentView = authContainerView,
-                buttonId = confirmButtonId,
-                opPackageName = authContainerView.biometricOpPackageName(),
-                attempt = 0,
-                delayMs = BIOMETRIC_INITIAL_DELAY_MS,
-            )
+            requestBiometricConfirm(authContainerView)
         }
         result
     }
@@ -60,82 +56,112 @@ internal fun XpOmniModule.handleBiometricHotReloadHook(
     ) {
         return UnhandledHotReloadHook
     }
+    if (biometricConfigField == null) {
+        cacheBiometricFields(executable.declaringClass)
+    }
 
     return with(chain) {
         val result = proceed()
         (thisObject as? View)?.let { authContainerView ->
-            val context = authContainerView.context
-            val confirmButtonId = context.resources.getIdentifier(
-                BIOMETRIC_BUTTON_CONFIRM_ID,
-                "id",
-                context.packageName,
-            )
-            scheduleBiometricConfirmClick(
-                parentView = authContainerView,
-                buttonId = confirmButtonId,
-                opPackageName = authContainerView.biometricOpPackageName(),
-                attempt = 0,
-                delayMs = BIOMETRIC_INITIAL_DELAY_MS,
-            )
+            requestBiometricConfirm(authContainerView)
         }
         result
     }
 }
 
+private fun XpOmniModule.cacheBiometricFields(authContainerViewClass: Class<*>) {
+    biometricConfigField =
+        runCatching {
+            authContainerViewClass.getDeclaredField("mConfig").apply { isAccessible = true }
+        }.onFailure { error ->
+            log(Log.WARN, TAG, "biometric reflect miss field=mConfig", error)
+        }.getOrNull()
+
+    biometricOpPackageNameField =
+        runCatching {
+            biometricConfigField?.type
+                ?.getDeclaredField("mOpPackageName")
+                ?.apply { isAccessible = true }
+        }.onFailure { error ->
+            log(Log.WARN, TAG, "biometric reflect miss field=mOpPackageName", error)
+        }.getOrNull()
+}
+
 private fun View.biometricOpPackageName(): String =
     runCatching {
-        val config = readField("mConfig") ?: return@runCatching null
-        config.readField("mOpPackageName") as? String
-    }.onFailure { error ->
-        Log.w(TAG, "biometric op package reflection failed", error)
+        val config = biometricConfigField?.get(this) ?: return@runCatching null
+        biometricOpPackageNameField?.get(config) as? String
     }.getOrNull() ?: "unknown"
 
-private fun XpOmniModule.scheduleBiometricConfirmClick(
-    parentView: View,
-    buttonId: Int,
-    opPackageName: String,
-    attempt: Int,
-    delayMs: Long,
-) {
-    parentView.postDelayed(
-        {
-            clickBiometricConfirmButton(
-                parentView = parentView,
-                buttonId = buttonId,
-                opPackageName = opPackageName,
-                attempt = attempt,
-                delayMs = delayMs,
-            )
-        },
-        delayMs,
+private fun XpOmniModule.requestBiometricConfirm(authContainerView: View) {
+    val buttonId = authContainerView.biometricConfirmButtonId()
+    val opPackageName = authContainerView.biometricOpPackageName()
+
+    if (buttonId == 0) {
+        log(Log.WARN, TAG, "Biometric confirm button id not found [$opPackageName]")
+        return
+    }
+
+    val startUptimeMs = SystemClock.uptimeMillis()
+    if (clickBiometricConfirmButton(authContainerView, buttonId, opPackageName, startUptimeMs)) {
+        return
+    }
+
+    retryBiometricConfirmUntilShown(
+        parentView = authContainerView,
+        buttonId = buttonId,
+        opPackageName = opPackageName,
+        startUptimeMs = startUptimeMs,
     )
+}
+
+private fun View.biometricConfirmButtonId(): Int {
+    val cachedId = biometricConfirmButtonId
+    if (cachedId != 0) return cachedId
+
+    val id = context.resources.getIdentifier(
+        BIOMETRIC_BUTTON_CONFIRM_ID,
+        "id",
+        context.packageName,
+    )
+    biometricConfirmButtonId = id
+    return id
 }
 
 private fun XpOmniModule.clickBiometricConfirmButton(
     parentView: View,
     buttonId: Int,
     opPackageName: String,
-    attempt: Int,
-    delayMs: Long,
+    startUptimeMs: Long,
+): Boolean {
+    val button = parentView.findViewById<Button?>(buttonId)
+    if (button == null || !button.isShown) {
+        return false
+    }
+
+    button.performClick()
+    val latencyMs = SystemClock.uptimeMillis() - startUptimeMs
+    log(Log.INFO, TAG, "Biometric confirm clicked [$opPackageName, ${latencyMs}ms]")
+    return true
+}
+
+private fun XpOmniModule.retryBiometricConfirmUntilShown(
+    parentView: View,
+    buttonId: Int,
+    opPackageName: String,
+    startUptimeMs: Long,
 ) {
-    val button = parentView.findViewById<View>(buttonId) as? Button
-    if (button?.isShown == true) {
-        button.performClick()
-        log(Log.INFO, TAG, "Biometric confirm clicked [$opPackageName]")
-        return
-    }
+    parentView.postOnAnimation {
+        if (clickBiometricConfirmButton(parentView, buttonId, opPackageName, startUptimeMs)) {
+            return@postOnAnimation
+        }
 
-    val nextAttempt = attempt + 1
-    if (nextAttempt >= BIOMETRIC_MAX_RETRIES) {
-        log(Log.WARN, TAG, "Biometric confirm button not found [$opPackageName]")
-        return
-    }
+        val elapsedMs = SystemClock.uptimeMillis() - startUptimeMs
+        if (elapsedMs >= BIOMETRIC_MAX_WAIT_MS) {
+            log(Log.WARN, TAG, "Biometric confirm button not found [$opPackageName, ${elapsedMs}ms]")
+            return@postOnAnimation
+        }
 
-    scheduleBiometricConfirmClick(
-        parentView = parentView,
-        buttonId = buttonId,
-        opPackageName = opPackageName,
-        attempt = nextAttempt,
-        delayMs = delayMs * 2,
-    )
+        retryBiometricConfirmUntilShown(parentView, buttonId, opPackageName, startUptimeMs)
+    }
 }
