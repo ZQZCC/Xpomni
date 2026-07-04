@@ -112,7 +112,6 @@ private fun XpOmniModule.hookPixelShortcutBadges(classLoader: ClassLoader) {
         }
     }
 
-    log(Log.INFO, TAG, "hooked Pixel Launcher shortcut badges")
 }
 
 private fun XpOmniModule.hookPixelBottomSearchBar(classLoader: ClassLoader) {
@@ -130,7 +129,6 @@ private fun XpOmniModule.hookPixelBottomSearchBar(classLoader: ClassLoader) {
         }
     }
 
-    log(Log.INFO, TAG, "hooked Pixel Launcher bottom search bar")
 }
 
 private fun XpOmniModule.hookPixelSearchBarResources() {
@@ -175,7 +173,6 @@ private fun XpOmniModule.hookPixelDoubleTapSleep(classLoader: ClassLoader) {
         result
     }
 
-    log(Log.INFO, TAG, "hooked Pixel Launcher double tap sleep")
 }
 
 private fun XpOmniModule.hookPixelLauncherNavbarPill(classLoader: ClassLoader) {
@@ -187,7 +184,6 @@ private fun XpOmniModule.hookPixelLauncherNavbarPill(classLoader: ClassLoader) {
         }
     }
 
-    log(Log.INFO, TAG, "hooked Pixel Launcher navbar pill")
 }
 
 private fun XpOmniModule.hookPixelLauncherNavbarInsets(classLoader: ClassLoader) {
@@ -198,7 +194,6 @@ private fun XpOmniModule.hookPixelLauncherNavbarInsets(classLoader: ClassLoader)
         proceed()
     }
 
-    log(Log.INFO, TAG, "hooked Pixel Launcher navbar insets")
 }
 
 internal fun XpOmniModule.hookLauncherSleepReceiver(classLoader: ClassLoader) {
@@ -247,7 +242,6 @@ private fun XpOmniModule.registerLauncherSleepReceiver(context: Context) {
         sleepReceiverContext = context
         launcherSleepReceiver = receiver
         sleepReceiverRegistered = true
-        log(Log.INFO, TAG, "registered launcher sleep receiver")
     }
 }
 

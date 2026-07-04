@@ -4,7 +4,6 @@ package ka.xpomni
 
 import android.content.res.Configuration
 import android.content.res.Resources
-import android.util.Log
 import io.github.libxposed.api.XposedInterface.Chain
 import java.lang.reflect.Executable
 
@@ -36,7 +35,6 @@ internal fun XpOmniModule.hookQuickSettingsTileRows() {
         }
 
         quickSettingsRowHooksInstalled = true
-        log(Log.INFO, TAG, "hooked quick settings tile rows")
     }
 }
 

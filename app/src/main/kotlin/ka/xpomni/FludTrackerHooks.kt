@@ -58,7 +58,7 @@ internal fun isFludTrackerUpdaterIdle(): Boolean = !FludTrackerUpdater.isUpdatin
 private object FludTrackerUpdater {
     private val SOURCES = arrayOf(
         "http://github.itzmx.com/1265578519/OpenTracker/master/tracker.txt",
-        "https://down.adysec.com/trackers_best.txt",
+        "https://tracker.adysec.com/trackers_best.txt",
     )
 
     private const val PREFS = "xpomni_flud_tracker"

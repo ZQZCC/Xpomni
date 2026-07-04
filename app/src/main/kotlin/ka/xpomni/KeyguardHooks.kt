@@ -3,7 +3,6 @@
 package ka.xpomni
 
 import android.content.Intent
-import android.util.Log
 import android.widget.TextView
 import io.github.libxposed.api.XposedInterface.Chain
 import java.lang.reflect.Constructor
@@ -58,7 +57,6 @@ internal fun XpOmniModule.hookKeyguardChargingInfo(classLoader: ClassLoader) {
         }
     }
 
-    log(Log.INFO, TAG, "hooked keyguard charging info")
 }
 
 internal fun XpOmniModule.hookKeyguardCarrierText(classLoader: ClassLoader) {
@@ -73,7 +71,6 @@ internal fun XpOmniModule.hookKeyguardCarrierText(classLoader: ClassLoader) {
         }
     }
 
-    log(Log.INFO, TAG, "hooked keyguard carrier text")
 }
 
 internal fun XpOmniModule.handleKeyguardHotReloadHook(

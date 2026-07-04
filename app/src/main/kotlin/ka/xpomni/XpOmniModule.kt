@@ -12,8 +12,10 @@ import io.github.libxposed.api.XposedModuleInterface.SystemServerStartingParam
 
 @SuppressLint("PrivateApi", "BlockedPrivateApi", "DiscouragedApi")
 class XpOmniModule : XposedModule() {
+    private var processName: String? = null
+
     override fun onModuleLoaded(param: ModuleLoadedParam) {
-        log(Log.INFO, TAG, "Xpomni loaded")
+        processName = param.processName
     }
 
     override fun onHotReloading(param: HotReloadingParam): Boolean {
@@ -140,21 +142,23 @@ class XpOmniModule : XposedModule() {
 
             SYSTEMUI, MIUI_SCREENSHOT -> {
                 if (packageName == SYSTEMUI) {
-                    runBiometricHook(classLoader)
                     runHook("hook SystemUI screenshot mute") {
                         hookSystemUiScreenshotMute(classLoader)
                     }
-                    runOptionalHook("hook keyguard charging info") {
-                        hookKeyguardChargingInfo(classLoader)
-                    }
-                    runOptionalHook("hook keyguard carrier text") {
-                        hookKeyguardCarrierText(classLoader)
-                    }
-                    runOptionalHook("hook quick settings tile rows") {
-                        hookQuickSettingsTileRows()
-                    }
-                    runOptionalHook("hook status bar traffic indicator") {
-                        hookStatusBarTrafficIndicator(classLoader)
+                    if (isMainPackageProcess(packageName)) {
+                        runBiometricHook(classLoader)
+                        runOptionalHook("hook keyguard charging info") {
+                            hookKeyguardChargingInfo(classLoader)
+                        }
+                        runOptionalHook("hook keyguard carrier text") {
+                            hookKeyguardCarrierText(classLoader)
+                        }
+                        runOptionalHook("hook quick settings tile rows") {
+                            hookQuickSettingsTileRows()
+                        }
+                        runOptionalHook("hook status bar traffic indicator") {
+                            hookStatusBarTrafficIndicator(classLoader)
+                        }
                     }
                 }
                 hookScreenCaptureInPackage(classLoader, packageName)
@@ -191,4 +195,7 @@ class XpOmniModule : XposedModule() {
             else -> Unit
         }
     }
+
+    private fun isMainPackageProcess(packageName: String): Boolean =
+        processName == null || processName == packageName
 }

@@ -5,7 +5,6 @@ package ka.xpomni
 import android.app.ActivityManager
 import android.content.IntentFilter
 import android.content.pm.ShortcutManager
-import android.util.Log
 import io.github.libxposed.api.XposedInterface.Chain
 import java.lang.reflect.Executable
 
@@ -28,7 +27,6 @@ private fun XpOmniModule.hookLowRamDeviceStatic() {
         true
     }
 
-    log(Log.INFO, TAG, "hooked DirectShare low-ram")
 }
 
 private fun XpOmniModule.hookServiceTargetCountFallback(classLoader: ClassLoader) {
@@ -42,7 +40,6 @@ private fun XpOmniModule.hookServiceTargetCountFallback(classLoader: ClassLoader
         0
     }
 
-    log(Log.INFO, TAG, "hooked DirectShare service-target-count")
 }
 
 internal fun XpOmniModule.hookShareTargets() {
@@ -56,7 +53,6 @@ internal fun XpOmniModule.hookShareTargets() {
         emptyList<Any>()
     }
 
-    log(Log.INFO, TAG, "hooked DirectShare share-targets")
 }
 
 internal fun XpOmniModule.handleShareSheetHotReloadHook(

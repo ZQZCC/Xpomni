@@ -53,7 +53,6 @@ internal fun XpOmniModule.hookGitHubFastPass(classLoader: ClassLoader) {
         result
     }
 
-    log(Log.INFO, TAG, "hooked GitHub FastPass")
 }
 
 internal fun XpOmniModule.handleGitHubHotReloadHook(
@@ -92,7 +91,6 @@ private fun XpOmniModule.dismissPendingGitHubVerification() {
 
     pendingGitHubVerificationActivity = null
     githubMainHandler.post { activity.finish() }
-    log(Log.INFO, TAG, "dismissed GitHub verification dialog")
 }
 
 private fun Class<*>.findEnumState(name: String): Class<*>? =

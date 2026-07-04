@@ -10,7 +10,6 @@ import android.text.SpannableString
 import android.text.SpannableStringBuilder
 import android.text.Spanned
 import android.text.style.RelativeSizeSpan
-import android.util.Log
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
@@ -22,6 +21,8 @@ import io.github.libxposed.api.XposedInterface.Chain
 import java.lang.ref.WeakReference
 import java.lang.reflect.Executable
 import java.text.DecimalFormat
+import java.text.DecimalFormatSymbols
+import java.util.Locale
 import kotlin.math.max
 
 private const val PHONE_STATUS_BAR_VIEW_CONTROLLER =
@@ -31,7 +32,6 @@ private const val STATUS_ICONS_ID = "statusIcons"
 private const val CLOCK_ID = "clock"
 private const val TRAFFIC_REFRESH_INTERVAL_MS = 1_000L
 private const val TRAFFIC_AUTO_HIDE_THRESHOLD_BYTES = 100L * 1024L
-private const val BITS_PER_BYTE = 8L
 private const val KILO = 1024L
 private const val MEGA = KILO * KILO
 private const val GIGA = MEGA * KILO
@@ -42,9 +42,6 @@ private const val STATUS_BAR_LEFT_CLOCK_END_PADDING = "status_bar_left_clock_end
 
 @Volatile
 private var trafficIndicatorRef: WeakReference<StatusBarTrafficView>? = null
-private val trafficFormat0_00 = DecimalFormat("0.00")
-private val trafficFormat00_0 = DecimalFormat("00.0")
-private val trafficFormat000 = DecimalFormat("000")
 
 internal fun XpOmniModule.hookStatusBarTrafficIndicator(classLoader: ClassLoader) {
     val controllerClass = classLoader.loadClass(PHONE_STATUS_BAR_VIEW_CONTROLLER)
@@ -65,8 +62,6 @@ internal fun XpOmniModule.hookStatusBarTrafficIndicator(classLoader: ClassLoader
             }
         }
     }
-
-    log(Log.INFO, TAG, "hooked status bar traffic indicator")
 }
 
 internal fun XpOmniModule.handleStatusBarTrafficHotReloadHook(
@@ -158,7 +153,7 @@ private fun ViewGroup.removeTrafficIndicators(systemIcons: View) {
 
 private fun View.isTrafficIndicator(hostClassLoader: ClassLoader?): Boolean {
     if (tag == TRAFFIC_INDICATOR_TAG) return true
-    if (this !is LinearLayout && this !is FrameLayout) return false
+    if (this !is TextView && this !is LinearLayout && this !is FrameLayout) return false
 
     val loader = javaClass.classLoader ?: return false
     return loader != hostClassLoader && loader != View::class.java.classLoader
@@ -176,8 +171,7 @@ private fun View.findChildByResourceName(entryName: String): View? {
     return findViewById(id)
 }
 
-private class StatusBarTrafficView(context: Context) : FrameLayout(context) {
-    private val trafficText = TextView(context)
+private class StatusBarTrafficView(context: Context) : TextView(context) {
     private val handler = Handler(Looper.getMainLooper())
     private val connectivityManager = context.getSystemService(ConnectivityManager::class.java)
     private var lastRxBytes = TrafficStats.UNSUPPORTED.toLong()
@@ -196,39 +190,20 @@ private class StatusBarTrafficView(context: Context) : FrameLayout(context) {
         importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO
         isClickable = false
         isFocusable = false
-
-        val contentLayout = LinearLayout(context).apply {
-            gravity = Gravity.CENTER_VERTICAL
-            layoutParams = LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                Gravity.CENTER_VERTICAL,
-            )
-        }
-
-        trafficText.gravity = Gravity.CENTER
-        trafficText.maxLines = 2
-        trafficText.textAlignment = View.TEXT_ALIGNMENT_CENTER
-        trafficText.includeFontPadding = false
-        trafficText.typeface = context.headlineBoldTypeface()
-        trafficText.setLineSpacing(0.85f, 0.85f)
-        trafficText.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 10f)
-
-        addView(contentLayout)
-        contentLayout.addView(
-            trafficText,
-            LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-            ),
-        )
+        gravity = Gravity.CENTER
+        maxLines = 2
+        textAlignment = View.TEXT_ALIGNMENT_CENTER
+        includeFontPadding = false
+        typeface = context.headlineBoldTypeface()
+        setLineSpacing(0.85f, 0.85f)
+        setTextSize(TypedValue.COMPLEX_UNIT_DIP, 10f)
     }
 
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
         resetCounters()
         handler.removeCallbacks(updateRunnable)
-        handler.post(updateRunnable)
+        handler.postDelayed(updateRunnable, TRAFFIC_REFRESH_INTERVAL_MS)
     }
 
     override fun onDetachedFromWindow() {
@@ -237,7 +212,7 @@ private class StatusBarTrafficView(context: Context) : FrameLayout(context) {
     }
 
     fun setTrafficColor(color: Int) {
-        trafficText.setTextColor(color)
+        setTextColor(color)
     }
 
     private fun updateTraffic() {
@@ -254,7 +229,9 @@ private class StatusBarTrafficView(context: Context) : FrameLayout(context) {
             return
         }
 
-        val elapsedMs = max(now - lastUpdateTime, 1L)
+        val elapsedMs = now - lastUpdateTime
+        if (elapsedMs < TRAFFIC_REFRESH_INTERVAL_MS / 2) return
+
         val rxBytesPerSecond = max(rxBytes - lastRxBytes, 0L) * 1_000L / elapsedMs
         val txBytesPerSecond = max(txBytes - lastTxBytes, 0L) * 1_000L / elapsedMs
 
@@ -268,7 +245,7 @@ private class StatusBarTrafficView(context: Context) : FrameLayout(context) {
             return
         }
 
-        trafficText.text = formatPixelXpertTrafficText(totalBytesPerSecond)
+        text = formatPixelXpertTrafficText(totalBytesPerSecond)
         visibility = VISIBLE
     }
 
@@ -286,29 +263,28 @@ private class StatusBarTrafficView(context: Context) : FrameLayout(context) {
 }
 
 private fun formatPixelXpertTrafficText(bytesPerSecond: Long): SpannableStringBuilder {
-    val bitsPerSecond = bytesPerSecond * BITS_PER_BYTE
     val (formattedData, unit) =
         when {
-            bitsPerSecond >= GIGA ->
-                trafficFormat0_00.format(bitsPerSecond / GIGA.toFloat()) to "Gb"
+            bytesPerSecond >= GIGA ->
+                formatTrafficValue("0.00", bytesPerSecond / GIGA.toFloat()) to "GB"
 
-            bitsPerSecond >= 100 * MEGA ->
-                trafficFormat000.format(bitsPerSecond / MEGA.toFloat()) to "Mb"
+            bytesPerSecond >= 100 * MEGA ->
+                formatTrafficValue("000", bytesPerSecond / MEGA.toFloat()) to "MB"
 
-            bitsPerSecond >= 10 * MEGA ->
-                trafficFormat00_0.format(bitsPerSecond / MEGA.toFloat()) to "Mb"
+            bytesPerSecond >= 10 * MEGA ->
+                formatTrafficValue("00.0", bytesPerSecond / MEGA.toFloat()) to "MB"
 
-            bitsPerSecond >= MEGA ->
-                trafficFormat0_00.format(bitsPerSecond / MEGA.toFloat()) to "Mb"
+            bytesPerSecond >= MEGA ->
+                formatTrafficValue("0.00", bytesPerSecond / MEGA.toFloat()) to "MB"
 
-            bitsPerSecond >= 100 * KILO ->
-                trafficFormat000.format(bitsPerSecond / KILO.toFloat()) to "Kb"
+            bytesPerSecond >= 100 * KILO ->
+                formatTrafficValue("000", bytesPerSecond / KILO.toFloat()) to "KB"
 
-            bitsPerSecond >= 10 * KILO ->
-                trafficFormat00_0.format(bitsPerSecond / KILO.toFloat()) to "Kb"
+            bytesPerSecond >= 10 * KILO ->
+                formatTrafficValue("00.0", bytesPerSecond / KILO.toFloat()) to "KB"
 
             else ->
-                trafficFormat0_00.format(bitsPerSecond / KILO.toFloat()) to "Kb"
+                formatTrafficValue("0.00", bytesPerSecond / KILO.toFloat()) to "KB"
         }
 
     val unitString = SpannableString(unit + TRAFFIC_SYMBOL).apply {
@@ -325,6 +301,9 @@ private fun formatPixelXpertTrafficText(bytesPerSecond: Long): SpannableStringBu
         .append("\n")
         .append(unitString)
 }
+
+private fun formatTrafficValue(pattern: String, value: Float): String =
+    DecimalFormat(pattern, DecimalFormatSymbols(Locale.US)).format(value)
 
 private fun Context.statusBarDimen(name: String): Int {
     val id = resources.getIdentifier(name, "dimen", SYSTEMUI)

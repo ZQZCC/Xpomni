@@ -115,7 +115,6 @@ internal fun XpOmniModule.replaceHooksForHotReload(handles: List<HookHandle>) {
             log(Log.ERROR, TAG, "hot reload hook replacement failed: ${executable.hookId()}", error)
         }
     }
-    log(Log.INFO, TAG, "hot reload replaced $replaced hooks, removed $removed hooks")
 }
 
 private fun XpOmniModule.dispatchHotReloadHook(
