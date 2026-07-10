@@ -5,13 +5,18 @@ package ka.xpomni
 import android.content.res.Configuration
 import android.content.res.Resources
 import io.github.libxposed.api.XposedInterface.Chain
+import io.github.libxposed.api.XposedInterface.Hooker
 import java.lang.reflect.Executable
 
 private const val QUICK_QS_ROWS = "quick_qs_paginated_grid_num_rows"
 private const val QUICK_QS_PORTRAIT_ROWS = 3
+private const val QUICK_SETTINGS_ROWS_HOOK_ID = "quick_settings.rows"
 
 @Volatile
 private var quickSettingsRowHooksInstalled = false
+
+@Volatile
+private var quickSettingsRowsId = 0
 
 internal fun XpOmniModule.hookQuickSettingsTileRows() {
     synchronized(XpOmniModule::class.java) {
@@ -22,31 +27,27 @@ internal fun XpOmniModule.hookQuickSettingsTileRows() {
             Int::class.javaPrimitiveType!!,
         )
 
-        intercept(getInteger) {
-            val resources = thisObject as Resources
-            val resId = getArg(0) as Int
-            val replacement = resources.quickSettingsPortraitRows(resId)
-
-            if (replacement != null) {
-                replacement
-            } else {
-                proceed()
-            }
+        intercept(getInteger, QUICK_SETTINGS_ROWS_HOOK_ID) {
+            handleQuickSettingsRows(this)
         }
 
         quickSettingsRowHooksInstalled = true
     }
 }
 
-internal fun XpOmniModule.handleQuickSettingsHotReloadHook(
+internal fun XpOmniModule.resolveQuickSettingsHotReloadHook(
+    hookId: String?,
     executable: Executable,
-    chain: Chain,
-): Any? =
-    with(chain) {
-        if (executable.declaringClass != Resources::class.java || executable.name != "getInteger") {
-            return@with UnhandledHotReloadHook
-        }
+): Hooker? {
+    val legacyMatch =
+        executable.declaringClass == Resources::class.java && executable.name == "getInteger"
+    if (hookId != QUICK_SETTINGS_ROWS_HOOK_ID && !legacyMatch) return null
 
+    return Hooker { chain -> handleQuickSettingsRows(chain) }
+}
+
+private fun handleQuickSettingsRows(chain: Chain): Any? =
+    with(chain) {
         val resources = thisObject as Resources
         val resId = getArg(0) as Int
         resources.quickSettingsPortraitRows(resId) ?: proceed()
@@ -55,13 +56,13 @@ internal fun XpOmniModule.handleQuickSettingsHotReloadHook(
 private fun Resources.quickSettingsPortraitRows(resId: Int): Int? {
     if (configuration.orientation != Configuration.ORIENTATION_PORTRAIT) return null
 
-    val isSystemUiResource = attempt(false) {
-        getResourcePackageName(resId) == SYSTEMUI
+    var targetId = quickSettingsRowsId
+    if (targetId == 0) {
+        targetId = attempt(0) {
+            getIdentifier(QUICK_QS_ROWS, "integer", SYSTEMUI)
+        }
+        if (targetId != 0) quickSettingsRowsId = targetId
     }
-    if (!isSystemUiResource) return null
 
-    return when (attempt<String?>(null) { getResourceEntryName(resId) }) {
-        QUICK_QS_ROWS -> QUICK_QS_PORTRAIT_ROWS
-        else -> null
-    }
+    return if (resId == targetId) QUICK_QS_PORTRAIT_ROWS else null
 }

@@ -8,6 +8,7 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import io.github.libxposed.api.XposedInterface.Chain
+import io.github.libxposed.api.XposedInterface.Hooker
 import java.lang.ref.WeakReference
 import java.lang.reflect.Executable
 import java.lang.reflect.Method
@@ -18,6 +19,8 @@ internal const val GITHUB = "com.github.android"
 private const val GITHUB_TWO_FACTOR_ACTIVITY = "com.github.android.twofactor.TwoFactorActivity"
 private const val GITHUB_TWO_FACTOR_DIALOG = "com.github.android.twofactor.TwoFactorDialog"
 private const val GITHUB_VERIFICATION_APPROVED = "FINISHED_APPROVED"
+private const val GITHUB_ACTIVITY_HOOK_ID = "github.activity"
+private const val GITHUB_STATE_HOOK_ID = "github.state"
 
 @Volatile
 private var pendingGitHubVerificationActivity: WeakReference<Activity>? = null
@@ -38,49 +41,53 @@ internal fun XpOmniModule.hookGitHubFastPass(classLoader: ClassLoader) {
             ?: return log(Log.WARN, TAG, "GitHub verification state mapper not found")
     val onCreate = activityClass.getDeclaredMethod("onCreate", Bundle::class.java)
 
-    intercept(onCreate) {
+    intercept(onCreate, GITHUB_ACTIVITY_HOOK_ID) {
+        handleGitHubActivity(this)
+    }
+
+    intercept(stateMapper, GITHUB_STATE_HOOK_ID) {
+        handleGitHubState(this)
+    }
+}
+
+internal fun XpOmniModule.resolveGitHubHotReloadHook(
+    hookId: String?,
+    executable: Executable,
+): Hooker? {
+    val legacyActivity =
+        executable.declaringClass.name == GITHUB_TWO_FACTOR_ACTIVITY &&
+            executable.name == "onCreate"
+    val legacyState =
+        executable.declaringClass.name == GITHUB_TWO_FACTOR_DIALOG &&
+            executable.parameterCount == 1 &&
+            (executable as? Method)?.returnType?.isEnum == true
+
+    return when {
+        hookId == GITHUB_ACTIVITY_HOOK_ID || legacyActivity ->
+            Hooker { chain -> handleGitHubActivity(chain) }
+
+        hookId == GITHUB_STATE_HOOK_ID || legacyState ->
+            Hooker { chain -> handleGitHubState(chain) }
+
+        else -> null
+    }
+}
+
+private fun handleGitHubActivity(chain: Chain): Any? =
+    with(chain) {
         proceed().also {
             pendingGitHubVerificationActivity = WeakReference(thisObject as Activity)
         }
     }
 
-    intercept(stateMapper) {
-        val result = proceed()
-        val state = result as? Enum<*> ?: return@intercept result
-        if (state.name != GITHUB_VERIFICATION_APPROVED) return@intercept result
-
-        dismissPendingGitHubVerification()
-        result
-    }
-
-}
-
-internal fun XpOmniModule.handleGitHubHotReloadHook(
-    executable: Executable,
-    chain: Chain,
-): Any? =
+private fun XpOmniModule.handleGitHubState(chain: Chain): Any? =
     with(chain) {
-        when {
-            executable.declaringClass.name == GITHUB_TWO_FACTOR_ACTIVITY &&
-                executable.name == "onCreate" -> {
-                proceed().also {
-                    pendingGitHubVerificationActivity = WeakReference(thisObject as Activity)
-                }
-            }
-
-            executable.declaringClass.name == GITHUB_TWO_FACTOR_DIALOG &&
-                executable.parameterCount == 1 &&
-                (executable as? Method)?.returnType?.isEnum == true -> {
-                val result = proceed()
-                val state = result as? Enum<*> ?: return@with result
-                if (state.name != GITHUB_VERIFICATION_APPROVED) return@with result
-
-                dismissPendingGitHubVerification()
-                result
-            }
-
-            else -> UnhandledHotReloadHook
+        val result = proceed()
+        val state = result as? Enum<*>
+        if (state?.name == GITHUB_VERIFICATION_APPROVED) {
+            dismissPendingGitHubVerification()
         }
+        result
     }
 
 private fun XpOmniModule.dismissPendingGitHubVerification() {

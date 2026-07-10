@@ -1,3 +1,5 @@
+@file:android.annotation.SuppressLint("MissingPermission")
+
 package ka.xpomni
 
 import android.content.Context
@@ -14,10 +16,10 @@ import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
-import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
 import io.github.libxposed.api.XposedInterface.Chain
+import io.github.libxposed.api.XposedInterface.Hooker
 import java.lang.ref.WeakReference
 import java.lang.reflect.Executable
 import java.text.DecimalFormat
@@ -39,6 +41,8 @@ private const val TRAFFIC_SYMBOL = "/s"
 private const val TRAFFIC_INDICATOR_TAG = "ka.xpomni.STATUS_BAR_TRAFFIC"
 private const val STATUS_BAR_CLOCK_STARTING_PADDING = "status_bar_clock_starting_padding"
 private const val STATUS_BAR_LEFT_CLOCK_END_PADDING = "status_bar_left_clock_end_padding"
+private const val TRAFFIC_ATTACH_HOOK_ID = "traffic.attach"
+private const val TRAFFIC_COLOR_HOOK_ID = "traffic.color"
 
 @Volatile
 private var trafficIndicatorRef: WeakReference<StatusBarTrafficView>? = null
@@ -46,7 +50,39 @@ private var trafficIndicatorRef: WeakReference<StatusBarTrafficView>? = null
 internal fun XpOmniModule.hookStatusBarTrafficIndicator(classLoader: ClassLoader) {
     val controllerClass = classLoader.loadClass(PHONE_STATUS_BAR_VIEW_CONTROLLER)
 
-    hookMethods(controllerClass, "onViewAttached") {
+    hookMethods(controllerClass, TRAFFIC_ATTACH_HOOK_ID, "onViewAttached") {
+        handleTrafficAttach(this)
+    }
+
+    runCatching { classLoader.loadClass(STATUS_BAR_CLOCK) }.getOrNull()?.let { clockClass ->
+        hookMethods(clockClass, TRAFFIC_COLOR_HOOK_ID, "onDarkChanged") {
+            handleTrafficColor(this)
+        }
+    }
+}
+
+internal fun XpOmniModule.resolveStatusBarTrafficHotReloadHook(
+    hookId: String?,
+    executable: Executable,
+): Hooker? {
+    val className = executable.declaringClass.name
+    val legacyAttach =
+        className == PHONE_STATUS_BAR_VIEW_CONTROLLER && executable.name == "onViewAttached"
+    val legacyColor = className == STATUS_BAR_CLOCK && executable.name == "onDarkChanged"
+
+    return when {
+        hookId == TRAFFIC_ATTACH_HOOK_ID || legacyAttach ->
+            Hooker { chain -> handleTrafficAttach(chain) }
+
+        hookId == TRAFFIC_COLOR_HOOK_ID || legacyColor ->
+            Hooker { chain -> handleTrafficColor(chain) }
+
+        else -> null
+    }
+}
+
+private fun handleTrafficAttach(chain: Chain): Any? =
+    with(chain) {
         proceed().also {
             thisObject
                 ?.statusBarViewOrNull()
@@ -54,44 +90,14 @@ internal fun XpOmniModule.hookStatusBarTrafficIndicator(classLoader: ClassLoader
         }
     }
 
-    runCatching { classLoader.loadClass(STATUS_BAR_CLOCK) }.getOrNull()?.let { clockClass ->
-        hookMethods(clockClass, "onDarkChanged") {
-            proceed().also {
-                val color = (thisObject as? TextView)?.currentTextColor ?: return@also
-                trafficIndicatorRef?.get()?.setTrafficColor(color)
-            }
-        }
-    }
-}
-
-internal fun XpOmniModule.handleStatusBarTrafficHotReloadHook(
-    executable: Executable,
-    chain: Chain,
-): Any? =
+private fun handleTrafficColor(chain: Chain): Any? =
     with(chain) {
-        when {
-            executable.declaringClass.name == PHONE_STATUS_BAR_VIEW_CONTROLLER &&
-                executable.name == "onViewAttached" -> {
-                proceed().also {
-                    thisObject
-                        ?.statusBarViewOrNull()
-                        ?.installTrafficIndicator()
-                }
+        proceed().also {
+            val clock = thisObject as? TextView ?: return@also
+            trafficIndicatorRef?.get()?.setTrafficColor(clock.currentTextColor)
+            if (trafficIndicatorRef?.get()?.parent == null) {
+                (clock.rootView as? ViewGroup)?.installTrafficIndicator()
             }
-
-            executable.declaringClass.name == STATUS_BAR_CLOCK &&
-                executable.name == "onDarkChanged" -> {
-                proceed().also {
-                    val clock = thisObject as? TextView ?: return@also
-                    val color = clock.currentTextColor
-                    trafficIndicatorRef?.get()?.setTrafficColor(color)
-                    if (trafficIndicatorRef?.get()?.parent == null) {
-                        (clock.rootView as? ViewGroup)?.installTrafficIndicator()
-                    }
-                }
-            }
-
-            else -> UnhandledHotReloadHook
         }
     }
 
@@ -141,22 +147,13 @@ private fun ViewGroup.trafficLayoutParams(): ViewGroup.LayoutParams =
     }
 
 private fun ViewGroup.removeTrafficIndicators(systemIcons: View) {
-    val hostClassLoader = context.classLoader
     for (index in childCount - 1 downTo 0) {
         val child = getChildAt(index)
         if (child === systemIcons) continue
-        if (child.isTrafficIndicator(hostClassLoader)) {
+        if (child.tag == TRAFFIC_INDICATOR_TAG) {
             removeView(child)
         }
     }
-}
-
-private fun View.isTrafficIndicator(hostClassLoader: ClassLoader?): Boolean {
-    if (tag == TRAFFIC_INDICATOR_TAG) return true
-    if (this !is TextView && this !is LinearLayout && this !is FrameLayout) return false
-
-    val loader = javaClass.classLoader ?: return false
-    return loader != hostClassLoader && loader != View::class.java.classLoader
 }
 
 private fun View.findSystemIcons(): ViewGroup? =

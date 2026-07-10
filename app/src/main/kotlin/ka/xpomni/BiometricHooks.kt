@@ -7,12 +7,14 @@ import android.os.SystemClock
 import android.view.View
 import android.widget.Button
 import io.github.libxposed.api.XposedInterface.Chain
+import io.github.libxposed.api.XposedInterface.Hooker
 import java.lang.reflect.Executable
 
 private const val BIOMETRIC_TARGET_CLASS = "com.android.systemui.biometrics.AuthContainerView"
 private const val BIOMETRIC_TARGET_METHOD = "onDialogAnimatedIn"
 private const val BIOMETRIC_BUTTON_CONFIRM_ID = "button_confirm"
 private const val BIOMETRIC_MAX_WAIT_MS = 1_500L
+private const val BIOMETRIC_HOOK_ID = "biometric.confirm"
 
 @Volatile
 private var biometricConfirmButtonId = 0
@@ -31,32 +33,31 @@ private fun XpOmniModule.hookBiometricBypass(classLoader: ClassLoader) {
     val authContainerViewClass = classLoader.loadClass(BIOMETRIC_TARGET_CLASS)
     val onDialogAnimatedIn = authContainerViewClass.getDeclaredMethod(BIOMETRIC_TARGET_METHOD)
 
-    intercept(onDialogAnimatedIn) {
-        val result = proceed()
-        (thisObject as? View)?.let { authContainerView ->
-            requestBiometricConfirm(authContainerView)
-        }
-        result
+    intercept(onDialogAnimatedIn, BIOMETRIC_HOOK_ID) {
+        handleBiometricConfirm(this)
     }
 }
 
-internal fun XpOmniModule.handleBiometricHotReloadHook(
+internal fun XpOmniModule.resolveBiometricHotReloadHook(
+    hookId: String?,
     executable: Executable,
-    chain: Chain,
-): Any? {
-    if (executable.declaringClass.name != BIOMETRIC_TARGET_CLASS ||
-        executable.name != BIOMETRIC_TARGET_METHOD
-    ) {
-        return UnhandledHotReloadHook
-    }
-    return with(chain) {
+): Hooker? {
+    val legacyMatch =
+        executable.declaringClass.name == BIOMETRIC_TARGET_CLASS &&
+            executable.name == BIOMETRIC_TARGET_METHOD
+    if (hookId != BIOMETRIC_HOOK_ID && !legacyMatch) return null
+
+    return Hooker { chain -> handleBiometricConfirm(chain) }
+}
+
+private fun XpOmniModule.handleBiometricConfirm(chain: Chain): Any? =
+    with(chain) {
         val result = proceed()
         (thisObject as? View)?.let { authContainerView ->
             requestBiometricConfirm(authContainerView)
         }
         result
     }
-}
 
 private fun XpOmniModule.requestBiometricConfirm(authContainerView: View) {
     val buttonId = authContainerView.biometricConfirmButtonId()
@@ -100,8 +101,7 @@ private fun clickBiometricConfirmButton(
         return false
     }
 
-    button.performClick()
-    return true
+    return button.performClick()
 }
 
 private fun XpOmniModule.retryBiometricConfirmUntilShown(

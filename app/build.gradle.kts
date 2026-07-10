@@ -124,8 +124,8 @@ android {
         applicationId = "ka.xpomni"
         minSdk = appMinSdk
         targetSdk = 36
-        versionCode = 12
-        versionName = "1.2.0"
+        versionCode = 13
+        versionName = "1.3.0"
     }
 
     signingConfigs {
@@ -336,8 +336,6 @@ tasks.register("stripReleaseDexDebugInfo") {
             .format(LocalDateTime.now())
         val namedApk = apk.parentFile.resolve("Xpomni-v$versionName-$versionCode-$timestamp.apk")
         apk.copyTo(namedApk, overwrite = true)
-
-        delete(layout.buildDirectory.dir("outputs/mapping/release"))
     }
 }
 

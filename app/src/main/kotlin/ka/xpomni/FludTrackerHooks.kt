@@ -4,9 +4,12 @@ import android.app.Application
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import android.util.AtomicFile
 import android.util.Log
 import android.widget.Toast
 import io.github.libxposed.api.XposedInterface.Chain
+import io.github.libxposed.api.XposedInterface.Hooker
+import java.io.IOException
 import java.io.InputStream
 import java.lang.reflect.Executable
 import java.net.HttpURLConnection
@@ -15,34 +18,34 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.LinkedHashSet
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.zip.GZIPInputStream
 
 internal const val FLUD_PLUS = "com.delphicoder.flud.paid"
+private const val FLUD_ATTACH_HOOK_ID = "flud.attach"
 
 internal fun XpOmniModule.hookFludTrackerUpdater() {
     val attach = Application::class.java.getDeclaredMethod("attach", Context::class.java)
     attach.isAccessible = true
 
-    intercept(attach) {
-        val result = proceed()
-        val baseContext = getArg(0) as Context
-        val context = baseContext.applicationContext ?: baseContext
-        FludTrackerUpdater.updateIfNeeded(context) { message, error ->
-            log(Log.ERROR, TAG, message, error)
-        }
-        result
+    intercept(attach, FLUD_ATTACH_HOOK_ID) {
+        handleFludAttach(this)
     }
 }
 
-internal fun XpOmniModule.handleFludHotReloadHook(
+internal fun XpOmniModule.resolveFludHotReloadHook(
+    hookId: String?,
     executable: Executable,
-    chain: Chain,
-): Any? {
-    if (executable.declaringClass != Application::class.java || executable.name != "attach") {
-        return UnhandledHotReloadHook
-    }
+): Hooker? {
+    val legacyMatch =
+        executable.declaringClass == Application::class.java && executable.name == "attach"
+    if (hookId != FLUD_ATTACH_HOOK_ID && !legacyMatch) return null
 
-    return with(chain) {
+    return Hooker { chain -> handleFludAttach(chain) }
+}
+
+private fun XpOmniModule.handleFludAttach(chain: Chain): Any? =
+    with(chain) {
         val result = proceed()
         val baseContext = getArg(0) as Context
         val context = baseContext.applicationContext ?: baseContext
@@ -51,7 +54,6 @@ internal fun XpOmniModule.handleFludHotReloadHook(
         }
         result
     }
-}
 
 internal fun isFludTrackerUpdaterIdle(): Boolean = !FludTrackerUpdater.isUpdating
 
@@ -64,7 +66,7 @@ private object FludTrackerUpdater {
     private const val PREFS = "xpomni_flud_tracker"
     private const val KEY_LAST_DAY = "last_update_day"
     private const val KEY_LAST_VERSION = "last_update_version"
-    private const val UPDATER_VERSION = 3
+    private const val UPDATER_VERSION = 4
     private const val TRACKERS_FILE = "default_trackers.txt"
     private const val TOAST_START = "\u5f00\u59cb\u66f4\u65b0\u8ffd\u8e2a\u5668\u5217\u8868\uff0c\u8bf7\u7a0d\u7b49~"
     private const val TOAST_UPDATING = "\u8ffd\u8e2a\u5668\u6b63\u5728\u66f4\u65b0"
@@ -77,11 +79,10 @@ private object FludTrackerUpdater {
     private val trackerPattern =
         Regex("""(?i)\b(?:udp|https?|wss?)://[^\s"'<>]+?announce[^\s"'<>]*""")
 
-    @Volatile
-    private var updating = false
+    private val updating = AtomicBoolean()
 
     val isUpdating: Boolean
-        get() = updating
+        get() = updating.get()
 
     fun updateIfNeeded(
         context: Context,
@@ -101,12 +102,11 @@ private object FludTrackerUpdater {
         logError: (String, Throwable?) -> Unit,
     ) {
         val appContext = context.applicationContext ?: context
-        if (updating) {
+        if (!updating.compareAndSet(false, true)) {
             toast(appContext, TOAST_UPDATING)
             return
         }
 
-        updating = true
         toast(appContext, TOAST_START)
         Thread({
             try {
@@ -130,7 +130,7 @@ private object FludTrackerUpdater {
                 logError("failed to update Flud trackers", error)
                 toast(appContext, TOAST_FAILED)
             } finally {
-                updating = false
+                updating.set(false)
             }
         }, "Xpomni-FludTrackers").start()
     }
@@ -183,8 +183,13 @@ private object FludTrackerUpdater {
             setRequestProperty("Accept-Encoding", "gzip")
         }
         return try {
-            val stream = runCatching<InputStream> { connection.inputStream }
-                .getOrElse { connection.errorStream ?: throw it }
+            val responseCode = connection.responseCode
+            if (responseCode !in 200..299) {
+                connection.errorStream?.close()
+                throw IOException("HTTP $responseCode")
+            }
+
+            val stream: InputStream = connection.inputStream
             val body = if (
                 connection.contentEncoding.equals("gzip", ignoreCase = true) ||
                 source.endsWith(".gz", ignoreCase = true)
@@ -203,14 +208,20 @@ private object FludTrackerUpdater {
         context: Context,
         trackers: List<String>,
     ) {
-        context.openFileOutput(TRACKERS_FILE, Context.MODE_PRIVATE)
-            .bufferedWriter(Charsets.UTF_8)
-            .use { writer ->
-                trackers.forEach { tracker ->
-                    writer.write(tracker)
-                    writer.newLine()
-                }
+        val file = AtomicFile(context.filesDir.resolve(TRACKERS_FILE))
+        val stream = file.startWrite()
+        try {
+            val writer = stream.bufferedWriter(Charsets.UTF_8)
+            trackers.forEach { tracker ->
+                writer.write(tracker)
+                writer.newLine()
             }
+            writer.flush()
+            file.finishWrite(stream)
+        } catch (error: Throwable) {
+            file.failWrite(stream)
+            throw error
+        }
     }
 
     private fun today(): String {

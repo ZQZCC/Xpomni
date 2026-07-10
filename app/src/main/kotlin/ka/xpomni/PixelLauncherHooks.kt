@@ -1,4 +1,10 @@
-@file:android.annotation.SuppressLint("PrivateApi", "BlockedPrivateApi", "DiscouragedApi", "MissingPermission")
+@file:android.annotation.SuppressLint(
+    "PrivateApi",
+    "BlockedPrivateApi",
+    "DiscouragedApi",
+    "MissingPermission",
+    "UnspecifiedRegisterReceiverFlag",
+)
 
 package ka.xpomni
 
@@ -15,20 +21,31 @@ import android.os.VibratorManager
 import android.util.Log
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewConfiguration
 import android.view.WindowManager
 import io.github.libxposed.api.XposedInterface.Chain
+import io.github.libxposed.api.XposedInterface.Hooker
 import java.lang.reflect.Executable
 import java.lang.reflect.Method
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.hypot
 
-private const val DOUBLE_TAP_TIMEOUT = 400L
-private const val TAP_DISTANCE_THRESHOLD = 50f
 private const val QSB_WIDGET_HEIGHT = "qsb_widget_height"
 private const val TASKBAR_ACTIVITY_CONTEXT = "com.android.launcher3.taskbar.TaskbarActivityContext"
 private const val SLEEP_ACTION = "ka.xpomni.action.PIXEL_LAUNCHER_SLEEP"
 private const val SLEEP_TOKEN_EXTRA = "ka.xpomni.extra.SLEEP_TOKEN"
 private const val SLEEP_TOKEN = "xpomni_pixel_launcher_sleep"
+private const val SLEEP_SENDER_PERMISSION = "android.permission.BIND_APPWIDGET"
+private const val PIXEL_BADGE_VIEW_HOOK_ID = "pixel.badge_view"
+private const val PIXEL_BADGE_APPLY_HOOK_ID = "pixel.badge_apply"
+private const val PIXEL_BADGE_ICON_HOOK_ID = "pixel.badge_icon"
+private const val PIXEL_SEARCH_BAR_HOOK_ID = "pixel.search_bar"
+private const val PIXEL_QSB_DIMENSION_HOOK_ID = "pixel.qsb_dimension"
+private const val PIXEL_QSB_PIXEL_HOOK_ID = "pixel.qsb_pixel"
+private const val PIXEL_DOUBLE_TAP_HOOK_ID = "pixel.double_tap"
+private const val PIXEL_NAVBAR_PILL_HOOK_ID = "pixel.navbar_pill"
+private const val PIXEL_NAVBAR_INSETS_HOOK_ID = "pixel.navbar_insets"
+private const val PIXEL_SLEEP_RECEIVER_HOOK_ID = "pixel.sleep_receiver"
 
 private var firstTapTime = 0L
 private var firstTapX = 0f
@@ -56,11 +73,6 @@ private var qsbWidgetHeightId = 0
 private var goToSleepMethod: Method? = null
 
 private val nonQsbWidgetHeightIds = ConcurrentHashMap.newKeySet<Int>()
-private val sentFromUidMethod by lazy(LazyThreadSafetyMode.PUBLICATION) {
-    BroadcastReceiver::class.java
-        .getDeclaredMethod("getSentFromUid")
-        .apply { isAccessible = true }
-}
 
 internal fun XpOmniModule.hookPixelLauncherFeatures(classLoader: ClassLoader) {
     runOptionalHook("hook Pixel Launcher shortcut badges") {
@@ -84,65 +96,52 @@ internal fun XpOmniModule.hookPixelLauncherFeatures(classLoader: ClassLoader) {
 private fun XpOmniModule.hookPixelShortcutBadges(classLoader: ClassLoader) {
     val bubbleTextViewClass = classLoader.loadClass("com.android.launcher3.BubbleTextView")
 
-    hookConstructors(bubbleTextViewClass) {
-        afterProceed { view ->
-            view?.writeField("mHideBadge", true)
-        }
+    hookConstructors(bubbleTextViewClass, PIXEL_BADGE_VIEW_HOOK_ID) {
+        handlePixelBadgeView(this)
     }
 
-    hookMethods(bubbleTextViewClass, "setHideBadge") {
-        afterProceed { view ->
-            view?.writeField("mHideBadge", true)
-        }
+    hookMethods(bubbleTextViewClass, PIXEL_BADGE_VIEW_HOOK_ID, "setHideBadge") {
+        handlePixelBadgeView(this)
     }
 
     runOptionalHook("hook Pixel Launcher bitmap badges") {
         val bitmapInfoClass = classLoader.loadClass("com.android.launcher3.icons.BitmapInfo")
 
-        hookMethods(bitmapInfoClass, "applyFlags") {
-            val result = proceed()
-            getArg(1)?.clearLauncherDrawableBadge()
-            result
+        hookMethods(bitmapInfoClass, PIXEL_BADGE_APPLY_HOOK_ID, "applyFlags") {
+            handlePixelBadgeApply(this)
         }
 
-        hookMethods(bitmapInfoClass, "newIcon") {
-            proceed().also { icon ->
-                icon?.clearLauncherDrawableBadge()
-            }
+        hookMethods(bitmapInfoClass, PIXEL_BADGE_ICON_HOOK_ID, "newIcon") {
+            handlePixelBadgeIcon(this)
         }
     }
-
 }
 
 private fun XpOmniModule.hookPixelBottomSearchBar(classLoader: ClassLoader) {
     val hotseatClass = classLoader.loadClass("com.android.launcher3.Hotseat")
 
-    hookConstructors(hotseatClass) {
-        afterProceed { hotseat ->
-            hotseat?.hideLauncherSearchBar()
-        }
+    hookConstructors(hotseatClass, PIXEL_SEARCH_BAR_HOOK_ID) {
+        handlePixelSearchBar(this)
     }
 
-    hookMethods(hotseatClass, "setInsets") {
-        afterProceed { hotseat ->
-            hotseat?.hideLauncherSearchBar()
-        }
+    hookMethods(hotseatClass, PIXEL_SEARCH_BAR_HOOK_ID, "setInsets") {
+        handlePixelSearchBar(this)
     }
-
 }
 
 private fun XpOmniModule.hookPixelSearchBarResources() {
     synchronized(XpOmniModule::class.java) {
         if (pixelResourceHooksInstalled) return@synchronized
-        hookResourceDimension("getDimension", 0f)
-        hookResourceDimension("getDimensionPixelOffset", 0)
-        hookResourceDimension("getDimensionPixelSize", 0)
+        hookResourceDimension("getDimension", PIXEL_QSB_DIMENSION_HOOK_ID, 0f)
+        hookResourceDimension("getDimensionPixelOffset", PIXEL_QSB_PIXEL_HOOK_ID, 0)
+        hookResourceDimension("getDimensionPixelSize", PIXEL_QSB_PIXEL_HOOK_ID, 0)
         pixelResourceHooksInstalled = true
     }
 }
 
 private fun XpOmniModule.hookResourceDimension(
     methodName: String,
+    hookId: String,
     replacement: Any,
 ) {
     val method = Resources::class.java.getDeclaredMethod(
@@ -150,14 +149,8 @@ private fun XpOmniModule.hookResourceDimension(
         Int::class.javaPrimitiveType!!,
     )
 
-    intercept(method) {
-        val resources = thisObject as Resources
-        val resId = getArg(0) as Int
-        if (resources.isLauncherQsbHeight(resId)) {
-            replacement
-        } else {
-            proceed()
-        }
+    intercept(method, hookId) {
+        handlePixelQsbDimension(this, replacement)
     }
 }
 
@@ -165,46 +158,37 @@ private fun XpOmniModule.hookPixelDoubleTapSleep(classLoader: ClassLoader) {
     val workspaceTouchListenerClass =
         classLoader.loadClass("com.android.launcher3.touch.WorkspaceTouchListener")
 
-    hookMethods(workspaceTouchListenerClass, "onTouch") {
-        val result = proceed()
-        val event = getArg(1) as MotionEvent
-        val context = thisObject?.launcherTouchContext() ?: return@hookMethods result
-        handleDoubleTapToSleep(context, event)
-        result
+    hookMethods(workspaceTouchListenerClass, PIXEL_DOUBLE_TAP_HOOK_ID, "onTouch") {
+        handlePixelDoubleTap(this)
     }
-
 }
 
 private fun XpOmniModule.hookPixelLauncherNavbarPill(classLoader: ClassLoader) {
     val taskbarActivityContextClass = classLoader.loadClass(TASKBAR_ACTIVITY_CONTEXT)
 
-    hookMethods(taskbarActivityContextClass, "init") {
-        afterProceed { taskbarContext ->
-            taskbarContext?.hideLauncherNavbarPill()
-        }
+    hookMethods(taskbarActivityContextClass, PIXEL_NAVBAR_PILL_HOOK_ID, "init") {
+        handlePixelNavbarPill(this)
     }
-
 }
 
 private fun XpOmniModule.hookPixelLauncherNavbarInsets(classLoader: ClassLoader) {
     val taskbarActivityContextClass = classLoader.loadClass(TASKBAR_ACTIVITY_CONTEXT)
 
-    hookMethods(taskbarActivityContextClass, "notifyUpdateLayoutParams") {
-        thisObject?.hideLauncherNavbarInsets()
-        proceed()
+    hookMethods(
+        taskbarActivityContextClass,
+        PIXEL_NAVBAR_INSETS_HOOK_ID,
+        "notifyUpdateLayoutParams",
+    ) {
+        handlePixelNavbarInsets(this)
     }
-
 }
 
 internal fun XpOmniModule.hookLauncherSleepReceiver(classLoader: ClassLoader) {
     val phoneWindowManagerClass =
         classLoader.loadClass("com.android.server.policy.PhoneWindowManager")
 
-    hookMethods(phoneWindowManagerClass, "init") {
-        proceed().also {
-            (args.firstOrNull { it is Context } as? Context)
-                ?.let(::registerLauncherSleepReceiver)
-        }
+    hookMethods(phoneWindowManagerClass, PIXEL_SLEEP_RECEIVER_HOOK_ID, "init") {
+        handleLauncherSleepReceiver(this)
     }
 }
 
@@ -217,8 +201,7 @@ private fun XpOmniModule.registerLauncherSleepReceiver(context: Context) {
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(receiverContext: Context, intent: Intent?) {
                 if (intent?.action != SLEEP_ACTION ||
-                    intent.getStringExtra(SLEEP_TOKEN_EXTRA) != SLEEP_TOKEN ||
-                    !isTrustedLauncherSleepSender(receiverContext)
+                    intent.getStringExtra(SLEEP_TOKEN_EXTRA) != SLEEP_TOKEN
                 ) {
                     return
                 }
@@ -233,10 +216,16 @@ private fun XpOmniModule.registerLauncherSleepReceiver(context: Context) {
         val filter = IntentFilter(SLEEP_ACTION)
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            context.registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED)
+            context.registerReceiver(
+                receiver,
+                filter,
+                SLEEP_SENDER_PERMISSION,
+                null,
+                Context.RECEIVER_EXPORTED,
+            )
         } else {
             @Suppress("DEPRECATION")
-            context.registerReceiver(receiver, filter)
+            context.registerReceiver(receiver, filter, SLEEP_SENDER_PERMISSION, null)
         }
 
         sleepReceiverContext = context
@@ -273,122 +262,141 @@ internal fun XpOmniModule.restorePixelLauncherHotReloadState(state: Any?) {
     registerLauncherSleepReceiver(context)
 }
 
-internal fun XpOmniModule.handlePixelLauncherHotReloadHook(
+internal fun XpOmniModule.resolvePixelLauncherHotReloadHook(
+    hookId: String?,
     executable: Executable,
+): Hooker? {
+    val className = executable.declaringClass.name
+    val legacyBadgeView = className == "com.android.launcher3.BubbleTextView"
+    val legacyBadgeApply =
+        className == "com.android.launcher3.icons.BitmapInfo" && executable.name == "applyFlags"
+    val legacyBadgeIcon =
+        className == "com.android.launcher3.icons.BitmapInfo" && executable.name == "newIcon"
+    val legacySearchBar = className == "com.android.launcher3.Hotseat"
+    val legacyQsbDimension =
+        executable.declaringClass == Resources::class.java && executable.name == "getDimension"
+    val legacyQsbPixel =
+        executable.declaringClass == Resources::class.java &&
+            (executable.name == "getDimensionPixelOffset" ||
+                executable.name == "getDimensionPixelSize")
+    val legacyDoubleTap =
+        className == "com.android.launcher3.touch.WorkspaceTouchListener" &&
+            executable.name == "onTouch"
+    val legacyNavbarPill = className == TASKBAR_ACTIVITY_CONTEXT && executable.name == "init"
+    val legacyNavbarInsets =
+        className == TASKBAR_ACTIVITY_CONTEXT && executable.name == "notifyUpdateLayoutParams"
+    val legacySleepReceiver =
+        className == "com.android.server.policy.PhoneWindowManager" && executable.name == "init"
+
+    return when {
+        hookId == PIXEL_BADGE_VIEW_HOOK_ID || legacyBadgeView ->
+            Hooker { chain -> handlePixelBadgeView(chain) }
+
+        hookId == PIXEL_BADGE_APPLY_HOOK_ID || legacyBadgeApply ->
+            Hooker { chain -> handlePixelBadgeApply(chain) }
+
+        hookId == PIXEL_BADGE_ICON_HOOK_ID || legacyBadgeIcon ->
+            Hooker { chain -> handlePixelBadgeIcon(chain) }
+
+        hookId == PIXEL_SEARCH_BAR_HOOK_ID || legacySearchBar ->
+            Hooker { chain -> handlePixelSearchBar(chain) }
+
+        hookId == PIXEL_QSB_DIMENSION_HOOK_ID || legacyQsbDimension ->
+            Hooker { chain -> handlePixelQsbDimension(chain, 0f) }
+
+        hookId == PIXEL_QSB_PIXEL_HOOK_ID || legacyQsbPixel ->
+            Hooker { chain -> handlePixelQsbDimension(chain, 0) }
+
+        hookId == PIXEL_DOUBLE_TAP_HOOK_ID || legacyDoubleTap ->
+            Hooker { chain -> handlePixelDoubleTap(chain) }
+
+        hookId == PIXEL_NAVBAR_PILL_HOOK_ID || legacyNavbarPill ->
+            Hooker { chain -> handlePixelNavbarPill(chain) }
+
+        hookId == PIXEL_NAVBAR_INSETS_HOOK_ID || legacyNavbarInsets ->
+            Hooker { chain -> handlePixelNavbarInsets(chain) }
+
+        hookId == PIXEL_SLEEP_RECEIVER_HOOK_ID || legacySleepReceiver ->
+            Hooker { chain -> handleLauncherSleepReceiver(chain) }
+
+        else -> null
+    }
+}
+
+private fun handlePixelBadgeView(chain: Chain): Any? =
+    with(chain) {
+        afterProceed { view -> view?.writeField("mHideBadge", true) }
+    }
+
+private fun handlePixelBadgeApply(chain: Chain): Any? =
+    with(chain) {
+        val result = proceed()
+        getArg(1)?.clearLauncherDrawableBadge()
+        result
+    }
+
+private fun handlePixelBadgeIcon(chain: Chain): Any? =
+    with(chain) {
+        proceed().also { icon -> icon?.clearLauncherDrawableBadge() }
+    }
+
+private fun handlePixelSearchBar(chain: Chain): Any? =
+    with(chain) {
+        afterProceed { hotseat -> hotseat?.hideLauncherSearchBar() }
+    }
+
+private fun handlePixelQsbDimension(
     chain: Chain,
+    replacement: Any,
 ): Any? =
     with(chain) {
-        when {
-            executable.declaringClass.name == "com.android.launcher3.BubbleTextView" &&
-                executable.name == "setHideBadge" -> {
-                afterProceed { view ->
-                    view?.writeField("mHideBadge", true)
-                }
-            }
+        val resources = thisObject as Resources
+        val resId = getArg(0) as Int
+        if (resources.isLauncherQsbHeight(resId)) replacement else proceed()
+    }
 
-            executable.declaringClass.name == "com.android.launcher3.BubbleTextView" -> {
-                afterProceed { view ->
-                    view?.writeField("mHideBadge", true)
-                }
-            }
+private fun handlePixelDoubleTap(chain: Chain): Any? =
+    with(chain) {
+        val result = proceed()
+        val event = getArg(1) as MotionEvent
+        thisObject?.launcherTouchContext()?.let { context ->
+            handleDoubleTapToSleep(context, event)
+        }
+        result
+    }
 
-            executable.declaringClass.name == "com.android.launcher3.icons.BitmapInfo" &&
-                executable.name == "applyFlags" -> {
-                val result = proceed()
-                getArg(1)?.clearLauncherDrawableBadge()
-                result
-            }
+private fun handlePixelNavbarPill(chain: Chain): Any? =
+    with(chain) {
+        afterProceed { taskbarContext -> taskbarContext?.hideLauncherNavbarPill() }
+    }
 
-            executable.declaringClass.name == "com.android.launcher3.icons.BitmapInfo" &&
-                executable.name == "newIcon" -> {
-                proceed().also { icon ->
-                    icon?.clearLauncherDrawableBadge()
-                }
-            }
+private fun handlePixelNavbarInsets(chain: Chain): Any? =
+    with(chain) {
+        thisObject?.hideLauncherNavbarInsets()
+        proceed()
+    }
 
-            executable.declaringClass.name == "com.android.launcher3.Hotseat" &&
-                executable.name == "setInsets" -> {
-                afterProceed { hotseat ->
-                    hotseat?.hideLauncherSearchBar()
-                }
-            }
-
-            executable.declaringClass.name == "com.android.launcher3.Hotseat" -> {
-                afterProceed { hotseat ->
-                    hotseat?.hideLauncherSearchBar()
-                }
-            }
-
-            executable.declaringClass == Resources::class.java &&
-                executable.name == "getDimension" -> {
-                val resources = thisObject as Resources
-                val resId = getArg(0) as Int
-                if (resources.isLauncherQsbHeight(resId)) 0f else proceed()
-            }
-
-            executable.declaringClass == Resources::class.java &&
-                (executable.name == "getDimensionPixelOffset" ||
-                    executable.name == "getDimensionPixelSize") -> {
-                val resources = thisObject as Resources
-                val resId = getArg(0) as Int
-                if (resources.isLauncherQsbHeight(resId)) 0 else proceed()
-            }
-
-            executable.declaringClass.name == "com.android.launcher3.touch.WorkspaceTouchListener" &&
-                executable.name == "onTouch" -> {
-                val result = proceed()
-                val event = getArg(1) as MotionEvent
-                val context = thisObject?.launcherTouchContext() ?: return@with result
-                handleDoubleTapToSleep(context, event)
-                result
-            }
-
-            executable.declaringClass.name == TASKBAR_ACTIVITY_CONTEXT &&
-                executable.name == "init" -> {
-                afterProceed { taskbarContext ->
-                    taskbarContext?.hideLauncherNavbarPill()
-                }
-            }
-
-            executable.declaringClass.name == TASKBAR_ACTIVITY_CONTEXT &&
-                executable.name == "notifyUpdateLayoutParams" -> {
-                thisObject?.hideLauncherNavbarInsets()
-                proceed()
-            }
-
-            executable.declaringClass.name == "com.android.server.policy.PhoneWindowManager" &&
-                executable.name == "init" -> {
-                proceed().also {
-                    (args.firstOrNull { it is Context } as? Context)
-                        ?.let(::registerLauncherSleepReceiver)
-                }
-            }
-
-            else -> UnhandledHotReloadHook
+private fun XpOmniModule.handleLauncherSleepReceiver(chain: Chain): Any? =
+    with(chain) {
+        proceed().also {
+            (args.firstOrNull { it is Context } as? Context)
+                ?.let(::registerLauncherSleepReceiver)
         }
     }
 
-private fun BroadcastReceiver.isTrustedLauncherSleepSender(context: Context): Boolean {
-    val senderUid = attempt(-1) {
-        sentFromUidMethod.invoke(this) as Int
-    }
-
-    if (senderUid < 0) return true
-
-    return context.packageManager
-        .getPackagesForUid(senderUid)
-        .orEmpty()
-        .any { it.isPixelLauncherPackage() }
-}
-
-private fun XpOmniModule.handleDoubleTapToSleep(
+private fun handleDoubleTapToSleep(
     context: Context,
     event: MotionEvent,
 ) {
+    val doubleTapTimeout = ViewConfiguration.getDoubleTapTimeout().toLong()
+    val viewConfiguration = ViewConfiguration.get(context)
+    val doubleTapDistance = viewConfiguration.scaledDoubleTapSlop.toDouble()
+    val moveDistance = viewConfiguration.scaledTouchSlop.toDouble()
+
     when (event.actionMasked) {
         MotionEvent.ACTION_DOWN -> {
             val currentTime = SystemClock.uptimeMillis()
-            if (currentTime - firstTapTime > DOUBLE_TAP_TIMEOUT) {
+            if (currentTime - firstTapTime > doubleTapTimeout) {
                 resetDoubleTapState()
             }
 
@@ -398,7 +406,7 @@ private fun XpOmniModule.handleDoubleTapToSleep(
                 firstTapY = event.y
                 isFirstTapRunning = true
             } else if (isFirstTapComplete) {
-                if (event.distanceFromFirstTap() <= TAP_DISTANCE_THRESHOLD) {
+                if (event.distanceFromFirstTap() <= doubleTapDistance) {
                     vibrateTick(context)
                     requestDeviceSleep(context)
                 }
@@ -413,10 +421,12 @@ private fun XpOmniModule.handleDoubleTapToSleep(
         }
 
         MotionEvent.ACTION_MOVE -> {
-            if (isFirstTapRunning && event.distanceFromFirstTap() > TAP_DISTANCE_THRESHOLD) {
+            if (isFirstTapRunning && event.distanceFromFirstTap() > moveDistance) {
                 resetDoubleTapState()
             }
         }
+
+        MotionEvent.ACTION_CANCEL, MotionEvent.ACTION_POINTER_DOWN -> resetDoubleTapState()
     }
 }
 
@@ -441,17 +451,13 @@ private fun vibrateTick(context: Context) {
     }
 }
 
-private fun XpOmniModule.requestDeviceSleep(context: Context) {
-    try {
-        context.goToSleepNow()
-    } catch (_: Throwable) {
-        context.sendBroadcast(
-            Intent(SLEEP_ACTION)
-                .setPackage(ANDROID_FRAMEWORK)
-                .putExtra(SLEEP_TOKEN_EXTRA, SLEEP_TOKEN)
-                .addFlags(Intent.FLAG_RECEIVER_FOREGROUND),
-        )
-    }
+private fun requestDeviceSleep(context: Context) {
+    context.sendBroadcast(
+        Intent(SLEEP_ACTION)
+            .setPackage(ANDROID_FRAMEWORK)
+            .putExtra(SLEEP_TOKEN_EXTRA, SLEEP_TOKEN)
+            .addFlags(Intent.FLAG_RECEIVER_FOREGROUND),
+    )
 }
 
 private fun Context.goToSleepNow() {
