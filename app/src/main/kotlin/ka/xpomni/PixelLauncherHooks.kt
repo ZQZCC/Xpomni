@@ -39,6 +39,7 @@ private const val SLEEP_SENDER_PERMISSION = "android.permission.BIND_APPWIDGET"
 private const val PIXEL_BADGE_VIEW_HOOK_ID = "pixel.badge_view"
 private const val PIXEL_BADGE_APPLY_HOOK_ID = "pixel.badge_apply"
 private const val PIXEL_BADGE_ICON_HOOK_ID = "pixel.badge_icon"
+private const val PIXEL_NO_BADGE_FLAG = 2
 private const val PIXEL_SEARCH_BAR_HOOK_ID = "pixel.search_bar"
 private const val PIXEL_QSB_DIMENSION_HOOK_ID = "pixel.qsb_dimension"
 private const val PIXEL_QSB_PIXEL_HOOK_ID = "pixel.qsb_pixel"
@@ -337,7 +338,13 @@ private fun handlePixelBadgeApply(chain: Chain): Any? =
 
 private fun handlePixelBadgeIcon(chain: Chain): Any? =
     with(chain) {
-        proceed().also { icon -> icon?.clearLauncherDrawableBadge() }
+        val flagIndex = args.indexOfFirst { it is Int }
+        if (flagIndex < 0) {
+            return@with proceed().also { icon -> icon?.clearLauncherDrawableBadge() }
+        }
+        val updatedArgs = argsArray()
+        updatedArgs[flagIndex] = (updatedArgs[flagIndex] as Int) or PIXEL_NO_BADGE_FLAG
+        proceed(updatedArgs)
     }
 
 private fun handlePixelSearchBar(chain: Chain): Any? =
