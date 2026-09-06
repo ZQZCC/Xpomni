@@ -6,8 +6,6 @@ import android.content.Intent
 import android.widget.TextView
 import io.github.libxposed.api.XposedInterface.Chain
 import io.github.libxposed.api.XposedInterface.Hooker
-import java.lang.reflect.Constructor
-import java.lang.reflect.Executable
 import java.util.concurrent.ConcurrentHashMap
 import java.util.Locale
 
@@ -47,48 +45,31 @@ internal fun XpOmniModule.hookKeyguardChargingInfo(classLoader: ClassLoader) {
     )
     val batteryStatusClass = classLoader.loadClass(BATTERY_STATUS)
 
-    hookConstructors(batteryStatusClass, KEYGUARD_BATTERY_HOOK_ID) {
-        handleBatteryStatus(this)
-    }
+    hookConstructors(batteryStatusClass, KEYGUARD_BATTERY_HOOK_ID)
 
-    hookMethods(indicationClass, KEYGUARD_POWER_HOOK_ID, "computePowerIndication") {
-        handlePowerIndication(this)
-    }
+    hookMethods(indicationClass, KEYGUARD_POWER_HOOK_ID, "computePowerIndication")
 }
 
 internal fun XpOmniModule.hookKeyguardCarrierText(classLoader: ClassLoader) {
     val carrierTextControllerClass = classLoader.loadClass(CARRIER_TEXT_CONTROLLER)
 
-    hookMethods(carrierTextControllerClass, KEYGUARD_CARRIER_INIT_HOOK_ID, "onInit") {
-        handleCarrierTextInit(this)
-    }
+    hookMethods(carrierTextControllerClass, KEYGUARD_CARRIER_INIT_HOOK_ID, "onInit")
 }
 
-internal fun XpOmniModule.resolveKeyguardHotReloadHook(
+internal fun XpOmniModule.resolveKeyguardHook(
     hookId: String?,
-    executable: Executable,
 ): Hooker? {
-    val className = executable.declaringClass.name
-    val legacyBattery = executable is Constructor<*> && className == BATTERY_STATUS
-    val legacyPower =
-        (className == KEYGUARD_INDICATION_CONTROLLER_GOOGLE ||
-            className == KEYGUARD_INDICATION_CONTROLLER) &&
-            executable.name == "computePowerIndication"
-    val legacyCarrierInit =
-        className == CARRIER_TEXT_CONTROLLER && executable.name == "onInit"
-    val legacyCarrierUpdate = executable.name == "updateCarrierInfo"
-
-    return when {
-        hookId == KEYGUARD_BATTERY_HOOK_ID || legacyBattery ->
+    return when (hookId) {
+        KEYGUARD_BATTERY_HOOK_ID ->
             Hooker { chain -> handleBatteryStatus(chain) }
 
-        hookId == KEYGUARD_POWER_HOOK_ID || legacyPower ->
+        KEYGUARD_POWER_HOOK_ID ->
             Hooker { chain -> handlePowerIndication(chain) }
 
-        hookId == KEYGUARD_CARRIER_INIT_HOOK_ID || legacyCarrierInit ->
+        KEYGUARD_CARRIER_INIT_HOOK_ID ->
             Hooker { chain -> handleCarrierTextInit(chain) }
 
-        hookId == KEYGUARD_CARRIER_UPDATE_HOOK_ID || legacyCarrierUpdate ->
+        KEYGUARD_CARRIER_UPDATE_HOOK_ID ->
             Hooker { null }
 
         else -> null
@@ -151,9 +132,7 @@ private fun XpOmniModule.hookCarrierTextUpdates(callback: Any) {
     val callbackClass = callback.javaClass
     if (!carrierTextCallbackClasses.add(callbackClass)) return
 
-    hookMethods(callbackClass, KEYGUARD_CARRIER_UPDATE_HOOK_ID, "updateCarrierInfo") {
-        null
-    }
+    hookMethods(callbackClass, KEYGUARD_CARRIER_UPDATE_HOOK_ID, "updateCarrierInfo")
 }
 
 private fun ClassLoader.loadFirstClass(vararg names: String): Class<*> {

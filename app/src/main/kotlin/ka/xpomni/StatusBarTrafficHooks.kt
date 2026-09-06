@@ -21,7 +21,6 @@ import android.widget.TextView
 import io.github.libxposed.api.XposedInterface.Chain
 import io.github.libxposed.api.XposedInterface.Hooker
 import java.lang.ref.WeakReference
-import java.lang.reflect.Executable
 import java.text.DecimalFormat
 import java.text.DecimalFormatSymbols
 import java.util.Locale
@@ -50,31 +49,21 @@ private var trafficIndicatorRef: WeakReference<StatusBarTrafficView>? = null
 internal fun XpOmniModule.hookStatusBarTrafficIndicator(classLoader: ClassLoader) {
     val controllerClass = classLoader.loadClass(PHONE_STATUS_BAR_VIEW_CONTROLLER)
 
-    hookMethods(controllerClass, TRAFFIC_ATTACH_HOOK_ID, "onViewAttached") {
-        handleTrafficAttach(this)
-    }
+    hookMethods(controllerClass, TRAFFIC_ATTACH_HOOK_ID, "onViewAttached")
 
     runCatching { classLoader.loadClass(STATUS_BAR_CLOCK) }.getOrNull()?.let { clockClass ->
-        hookMethods(clockClass, TRAFFIC_COLOR_HOOK_ID, "onDarkChanged") {
-            handleTrafficColor(this)
-        }
+        hookMethods(clockClass, TRAFFIC_COLOR_HOOK_ID, "onDarkChanged")
     }
 }
 
-internal fun XpOmniModule.resolveStatusBarTrafficHotReloadHook(
+internal fun XpOmniModule.resolveStatusBarTrafficHook(
     hookId: String?,
-    executable: Executable,
 ): Hooker? {
-    val className = executable.declaringClass.name
-    val legacyAttach =
-        className == PHONE_STATUS_BAR_VIEW_CONTROLLER && executable.name == "onViewAttached"
-    val legacyColor = className == STATUS_BAR_CLOCK && executable.name == "onDarkChanged"
-
-    return when {
-        hookId == TRAFFIC_ATTACH_HOOK_ID || legacyAttach ->
+    return when (hookId) {
+        TRAFFIC_ATTACH_HOOK_ID ->
             Hooker { chain -> handleTrafficAttach(chain) }
 
-        hookId == TRAFFIC_COLOR_HOOK_ID || legacyColor ->
+        TRAFFIC_COLOR_HOOK_ID ->
             Hooker { chain -> handleTrafficColor(chain) }
 
         else -> null
@@ -94,7 +83,7 @@ private fun handleTrafficColor(chain: Chain): Any? =
     with(chain) {
         proceed().also {
             val clock = thisObject as? TextView ?: return@also
-            trafficIndicatorRef?.get()?.setTrafficColor(clock.currentTextColor)
+            trafficIndicatorRef?.get()?.setTextColor(clock.currentTextColor)
             if (trafficIndicatorRef?.get()?.parent == null) {
                 (clock.rootView as? ViewGroup)?.installTrafficIndicator()
             }
@@ -114,7 +103,7 @@ private fun ViewGroup.installTrafficIndicator() {
     indicator.tag = TRAFFIC_INDICATOR_TAG
 
     findClock()?.let { clock ->
-        indicator.setTrafficColor(clock.currentTextColor)
+        indicator.setTextColor(clock.currentTextColor)
     }
 
     indicator.setPadding(
@@ -208,10 +197,6 @@ private class StatusBarTrafficView(context: Context) : TextView(context) {
         super.onDetachedFromWindow()
     }
 
-    fun setTrafficColor(color: Int) {
-        setTextColor(color)
-    }
-
     private fun updateTraffic() {
         val now = SystemClock.elapsedRealtime()
         val rxBytes = TrafficStats.getTotalRxBytes()
@@ -237,7 +222,7 @@ private class StatusBarTrafficView(context: Context) : TextView(context) {
         lastUpdateTime = now
 
         val totalBytesPerSecond = rxBytesPerSecond + txBytesPerSecond
-        if (!hasActiveNetwork() || shouldAutoHide(totalBytesPerSecond)) {
+        if (shouldAutoHide(totalBytesPerSecond) || !hasActiveNetwork()) {
             visibility = GONE
             return
         }
@@ -274,14 +259,8 @@ private fun formatPixelXpertTrafficText(bytesPerSecond: Long): SpannableStringBu
             bytesPerSecond >= MEGA ->
                 formatTrafficValue("0.00", bytesPerSecond / MEGA.toFloat()) to "MB"
 
-            bytesPerSecond >= 100 * KILO ->
-                formatTrafficValue("000", bytesPerSecond / KILO.toFloat()) to "KB"
-
-            bytesPerSecond >= 10 * KILO ->
-                formatTrafficValue("00.0", bytesPerSecond / KILO.toFloat()) to "KB"
-
             else ->
-                formatTrafficValue("0.00", bytesPerSecond / KILO.toFloat()) to "KB"
+                formatTrafficValue("000", bytesPerSecond / KILO.toFloat()) to "KB"
         }
 
     val unitString = SpannableString(unit + TRAFFIC_SYMBOL).apply {

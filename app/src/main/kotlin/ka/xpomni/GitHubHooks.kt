@@ -10,7 +10,6 @@ import android.util.Log
 import io.github.libxposed.api.XposedInterface.Chain
 import io.github.libxposed.api.XposedInterface.Hooker
 import java.lang.ref.WeakReference
-import java.lang.reflect.Executable
 import java.lang.reflect.Method
 import java.lang.reflect.Modifier
 
@@ -41,32 +40,19 @@ internal fun XpOmniModule.hookGitHubFastPass(classLoader: ClassLoader) {
             ?: return log(Log.WARN, TAG, "GitHub verification state mapper not found")
     val onCreate = activityClass.getDeclaredMethod("onCreate", Bundle::class.java)
 
-    intercept(onCreate, GITHUB_ACTIVITY_HOOK_ID) {
-        handleGitHubActivity(this)
-    }
+    intercept(onCreate, GITHUB_ACTIVITY_HOOK_ID)
 
-    intercept(stateMapper, GITHUB_STATE_HOOK_ID) {
-        handleGitHubState(this)
-    }
+    intercept(stateMapper, GITHUB_STATE_HOOK_ID)
 }
 
-internal fun XpOmniModule.resolveGitHubHotReloadHook(
+internal fun XpOmniModule.resolveGitHubHook(
     hookId: String?,
-    executable: Executable,
 ): Hooker? {
-    val legacyActivity =
-        executable.declaringClass.name == GITHUB_TWO_FACTOR_ACTIVITY &&
-            executable.name == "onCreate"
-    val legacyState =
-        executable.declaringClass.name == GITHUB_TWO_FACTOR_DIALOG &&
-            executable.parameterCount == 1 &&
-            (executable as? Method)?.returnType?.isEnum == true
-
-    return when {
-        hookId == GITHUB_ACTIVITY_HOOK_ID || legacyActivity ->
+    return when (hookId) {
+        GITHUB_ACTIVITY_HOOK_ID ->
             Hooker { chain -> handleGitHubActivity(chain) }
 
-        hookId == GITHUB_STATE_HOOK_ID || legacyState ->
+        GITHUB_STATE_HOOK_ID ->
             Hooker { chain -> handleGitHubState(chain) }
 
         else -> null

@@ -10,8 +10,6 @@ import android.widget.Toast
 import io.github.libxposed.api.XposedInterface.Chain
 import io.github.libxposed.api.XposedInterface.Hooker
 import java.io.IOException
-import java.io.InputStream
-import java.lang.reflect.Executable
 import java.net.HttpURLConnection
 import java.net.URL
 import java.text.SimpleDateFormat
@@ -19,7 +17,6 @@ import java.util.Date
 import java.util.LinkedHashSet
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.zip.GZIPInputStream
 
 internal const val FLUD_PLUS = "com.delphicoder.flud.paid"
 private const val FLUD_ATTACH_HOOK_ID = "flud.attach"
@@ -28,21 +25,11 @@ internal fun XpOmniModule.hookFludTrackerUpdater() {
     val attach = Application::class.java.getDeclaredMethod("attach", Context::class.java)
     attach.isAccessible = true
 
-    intercept(attach, FLUD_ATTACH_HOOK_ID) {
-        handleFludAttach(this)
-    }
+    intercept(attach, FLUD_ATTACH_HOOK_ID)
 }
 
-internal fun XpOmniModule.resolveFludHotReloadHook(
-    hookId: String?,
-    executable: Executable,
-): Hooker? {
-    val legacyMatch =
-        executable.declaringClass == Application::class.java && executable.name == "attach"
-    if (hookId != FLUD_ATTACH_HOOK_ID && !legacyMatch) return null
-
-    return Hooker { chain -> handleFludAttach(chain) }
-}
+internal fun XpOmniModule.resolveFludHook(hookId: String?): Hooker? =
+    if (hookId == FLUD_ATTACH_HOOK_ID) Hooker { chain -> handleFludAttach(chain) } else null
 
 private fun XpOmniModule.handleFludAttach(chain: Chain): Any? =
     with(chain) {
@@ -112,7 +99,7 @@ private object FludTrackerUpdater {
             try {
                 val update = collectTrackers(logError)
                 if (update.trackers.isEmpty()) {
-                    toast(appContext, if (update.failureCount > 0) TOAST_FAILED else TOAST_NO_TRACKERS)
+                    toast(appContext, if (update.hasFailures) TOAST_FAILED else TOAST_NO_TRACKERS)
                 } else {
                     writeDefaultTrackers(appContext, update.trackers)
                     appContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -121,7 +108,7 @@ private object FludTrackerUpdater {
                         .putInt(KEY_LAST_VERSION, UPDATER_VERSION)
                         .apply()
 
-                    if (update.failureCount > 0) {
+                    if (update.hasFailures) {
                         toast(appContext, TOAST_PARTIAL_FAILED)
                     }
                     toast(appContext, TOAST_UPDATED_PREFIX + update.trackers.size + TOAST_UPDATED_SUFFIX)
@@ -137,18 +124,18 @@ private object FludTrackerUpdater {
 
     private fun collectTrackers(logError: (String, Throwable?) -> Unit): UpdateResult {
         val trackers = LinkedHashSet<String>()
-        var failureCount = 0
+        var hasFailures = false
 
         for (source in SOURCES) {
             runCatching {
                 parseTrackers(fetch(source), trackers)
             }.onFailure { error ->
-                failureCount++
+                hasFailures = true
                 logError("failed to fetch trackers from $source", error)
             }
         }
 
-        return UpdateResult(trackers.toList(), failureCount)
+        return UpdateResult(trackers, hasFailures)
     }
 
     private fun parseTrackers(
@@ -159,16 +146,13 @@ private object FludTrackerUpdater {
             .map { it.trim() }
             .filter { it.isNotEmpty() && !it.startsWith("#") }
             .forEach { line ->
-                if (looksLikeTracker(line)) {
-                    output += cleanTracker(line)
+                val tracker = cleanTracker(line)
+                if (trackerPattern.matches(tracker)) {
+                    output += tracker
                 } else {
                     trackerPattern.findAll(line).forEach { output += cleanTracker(it.value) }
                 }
             }
-    }
-
-    private fun looksLikeTracker(value: String): Boolean {
-        return trackerPattern.matches(cleanTracker(value))
     }
 
     private fun cleanTracker(value: String): String {
@@ -179,8 +163,6 @@ private object FludTrackerUpdater {
         val connection = (URL(source).openConnection() as HttpURLConnection).apply {
             connectTimeout = 10_000
             readTimeout = 10_000
-            requestMethod = "GET"
-            setRequestProperty("Accept-Encoding", "gzip")
         }
         return try {
             val responseCode = connection.responseCode
@@ -189,16 +171,7 @@ private object FludTrackerUpdater {
                 throw IOException("HTTP $responseCode")
             }
 
-            val stream: InputStream = connection.inputStream
-            val body = if (
-                connection.contentEncoding.equals("gzip", ignoreCase = true) ||
-                source.endsWith(".gz", ignoreCase = true)
-            ) {
-                GZIPInputStream(stream)
-            } else {
-                stream
-            }
-            body.bufferedReader(Charsets.UTF_8).use { it.readText() }
+            connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
         } finally {
             connection.disconnect()
         }
@@ -206,7 +179,7 @@ private object FludTrackerUpdater {
 
     private fun writeDefaultTrackers(
         context: Context,
-        trackers: List<String>,
+        trackers: Set<String>,
     ) {
         val file = AtomicFile(context.filesDir.resolve(TRACKERS_FILE))
         val stream = file.startWrite()
@@ -238,7 +211,7 @@ private object FludTrackerUpdater {
     }
 
     private data class UpdateResult(
-        val trackers: List<String>,
-        val failureCount: Int,
+        val trackers: Set<String>,
+        val hasFailures: Boolean,
     )
 }

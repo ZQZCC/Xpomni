@@ -33,14 +33,17 @@ fun readUleb128(bytes: ByteArray, offsetRef: IntArray): Int {
     var result = 0
     var shift = 0
     var offset = offsetRef[0]
-    while (true) {
+    repeat(5) {
+        check(offset < bytes.size) { "Truncated DEX ULEB128 value" }
         val value = bytes[offset++].toInt() and 0xff
         result = result or ((value and 0x7f) shl shift)
-        if ((value and 0x80) == 0) break
+        if ((value and 0x80) == 0) {
+            offsetRef[0] = offset
+            return result
+        }
         shift += 7
     }
-    offsetRef[0] = offset
-    return result
+    error("Invalid DEX ULEB128 value")
 }
 
 fun updateDexHashes(bytes: ByteArray) {
@@ -53,14 +56,16 @@ fun updateDexHashes(bytes: ByteArray) {
     writeIntLe(bytes, 8, adler32.value.toInt())
 }
 
-fun stripDexDebugInfo(input: ByteArray): ByteArray {
-    val bytes = input.clone()
+fun forEachDexDebugReference(bytes: ByteArray, visit: (offset: Int, clearedValue: Int) -> Unit) {
+    check(bytes.size >= 112 && bytes.copyOfRange(0, 4).contentEquals("dex\n".toByteArray())) {
+        "Invalid DEX input"
+    }
     val classDefsSize = readIntLe(bytes, 0x60)
     val classDefsOff = readIntLe(bytes, 0x64)
 
     for (classIndex in 0 until classDefsSize) {
         val classDefOff = classDefsOff + classIndex * 32
-        writeIntLe(bytes, classDefOff + 16, -1)
+        visit(classDefOff + 16, -1)
 
         val classDataOff = readIntLe(bytes, classDefOff + 24)
         if (classDataOff == 0) continue
@@ -81,13 +86,26 @@ fun stripDexDebugInfo(input: ByteArray): ByteArray {
             readUleb128(bytes, cursor)
             val codeOff = readUleb128(bytes, cursor)
             if (codeOff != 0) {
-                writeIntLe(bytes, codeOff + 8, 0)
+                visit(codeOff + 8, 0)
             }
         }
     }
+}
 
+fun stripDexDebugInfo(input: ByteArray): ByteArray = input.clone().also { bytes ->
+    forEachDexDebugReference(bytes) { offset, value -> writeIntLe(bytes, offset, value) }
     updateDexHashes(bytes)
-    return bytes
+}
+
+fun verifyDexDebugInfoRemoved(bytes: ByteArray) {
+    forEachDexDebugReference(bytes) { offset, value ->
+        check(readIntLe(bytes, offset) == value) { "DEX still contains a debug reference" }
+    }
+    val mapOffset = readIntLe(bytes, 0x34)
+    repeat(readIntLe(bytes, mapOffset)) { index ->
+        val type = readIntLe(bytes, mapOffset + 4 + index * 12) and 0xffff
+        check(type != 0x2003) { "DEX still contains debug_info_item data" }
+    }
 }
 
 fun dexEntryOrder(name: String): Int {
@@ -125,8 +143,8 @@ android {
         applicationId = "ka.xpomni"
         minSdk = appMinSdk
         targetSdk = 37
-        versionCode = 15
-        versionName = "1.3.2"
+        versionCode = 16
+        versionName = "1.3.3"
     }
 
     signingConfigs {
@@ -156,7 +174,6 @@ android {
             } else {
                 signingConfigs.getByName("debug")
             }
-            vcsInfo.include = false
             isMinifyEnabled = true
         }
     }
@@ -193,12 +210,40 @@ dependencies {
     compileOnly("io.github.libxposed:api:102.0.0")
 }
 
-tasks.register("stripReleaseDexDebugInfo") {
+val rawReleaseApk = layout.buildDirectory.file("outputs/apk/release/app-release.apk")
+val processedReleaseApk = layout.buildDirectory.file("outputs/apk/minimalRelease/app-release.apk")
+val windows = System.getProperty("os.name").lowercase(Locale.ROOT).contains("windows")
+val buildTools = androidComponents.sdkComponents.sdkDirectory.map {
+    it.dir("build-tools/${android.buildToolsVersion}")
+}
+val d8Jar = buildTools.map { it.file("lib/d8.jar") }
+val zipalign = buildTools.map { it.file(if (windows) "zipalign.exe" else "zipalign") }
+val apksigner = buildTools.map { it.file(if (windows) "apksigner.bat" else "apksigner") }
+val javaExecutable = File(System.getProperty("java.home"), "bin/${if (windows) "java.exe" else "java"}")
+val releaseSigning = android.buildTypes.getByName("release").signingConfig
+
+val stripReleaseDexDebugInfo = tasks.register("stripReleaseDexDebugInfo") {
     dependsOn("packageRelease")
+    inputs.file(rawReleaseApk)
+    inputs.file(d8Jar)
+    inputs.file(zipalign)
+    inputs.file(apksigner)
+    inputs.file(buildTools.map { it.file("lib/apksigner.jar") })
+    inputs.property("minSdk", appMinSdk)
+    inputs.property("javaRuntime", System.getProperty("java.runtime.version"))
+    releaseSigning?.let { signing ->
+        signing.storeFile?.let { inputs.file(it) }
+        inputs.property("keyAlias", signing.keyAlias.orEmpty())
+        inputs.property("storeType", signing.storeType.orEmpty())
+    }
+    outputs.file(processedReleaseApk)
 
     doLast {
-        val apk = layout.buildDirectory.file("outputs/apk/release/app-release.apk").get().asFile
-        val workDir = layout.buildDirectory.dir("stripReleaseDexDebugInfo").get().asFile
+        val apk = rawReleaseApk.get().asFile
+        val processedApk = processedReleaseApk.get().asFile
+        processedApk.parentFile.mkdirs()
+        val workDir = temporaryDir
+        check(workDir.canonicalFile.toPath().startsWith(layout.buildDirectory.get().asFile.canonicalFile.toPath()))
         delete(workDir)
         workDir.mkdirs()
 
@@ -209,11 +254,13 @@ tasks.register("stripReleaseDexDebugInfo") {
         strippedDexInputDir.mkdirs()
         compactedDexDir.mkdirs()
         val strippedDexInputs = mutableListOf<File>()
+        var dexTimestamp = 0L
         val dexEntryName = Regex("""classes(\d*)?\.dex""")
 
         ZipFile(apk).use { zip ->
             zip.entries().asSequence().forEach { entry ->
                 if (dexEntryName.matches(entry.name)) {
+                    if (strippedDexInputs.isEmpty()) dexTimestamp = entry.time
                     zip.getInputStream(entry).use { input ->
                         val strippedDex = strippedDexInputDir.resolve(entry.name)
                         strippedDex.writeBytes(stripDexDebugInfo(input.readBytes()))
@@ -223,37 +270,13 @@ tasks.register("stripReleaseDexDebugInfo") {
             }
         }
 
-        val windows = System.getProperty("os.name").lowercase(Locale.ROOT).contains("windows")
-        var sdkPath = System.getenv("ANDROID_HOME") ?: System.getenv("ANDROID_SDK_ROOT")
-        if (sdkPath == null && rootProject.file("local.properties").exists()) {
-            val sdkProperties = Properties()
-            rootProject.file("local.properties").inputStream().use { sdkProperties.load(it) }
-            sdkPath = sdkProperties.getProperty("sdk.dir")
-        }
-        if (sdkPath == null) {
-            throw GradleException("ANDROID_HOME or sdk.dir is required to strip dex debug info.")
-        }
-
-        val buildTools = File(sdkPath, "build-tools/${android.buildToolsVersion}")
-        val d8Jar = buildTools.resolve("lib/d8.jar")
-        val zipalign = buildTools.resolve(if (windows) "zipalign.exe" else "zipalign")
-        val apksigner = buildTools.resolve(if (windows) "apksigner.bat" else "apksigner")
-        val javaExecutable = File(System.getProperty("java.home"), "bin/${if (windows) "java.exe" else "java"}")
-
-        if (!d8Jar.isFile) {
-            throw GradleException("D8 jar was not found at ${d8Jar.absolutePath}.")
-        }
-        if (!javaExecutable.isFile) {
-            throw GradleException("Java executable was not found at ${javaExecutable.absolutePath}.")
-        }
-
         if (strippedDexInputs.isNotEmpty()) {
             providers.exec {
                 commandLine(
                     listOf(
                         javaExecutable.absolutePath,
                         "-cp",
-                        d8Jar.absolutePath,
+                        d8Jar.get().asFile.absolutePath,
                         "com.android.tools.r8.D8",
                         "--release",
                         "--min-api",
@@ -272,12 +295,13 @@ tasks.register("stripReleaseDexDebugInfo") {
         if (strippedDexInputs.isNotEmpty() && compactedDex.isEmpty()) {
             throw GradleException("D8 did not emit any compacted dex files.")
         }
+        compactedDex.forEach { verifyDexDebugInfoRemoved(it.readBytes()) }
 
         ZipOutputStream(BufferedOutputStream(FileOutputStream(unsignedApk))).use { output ->
             ZipFile(apk).use { zip ->
                 zip.entries().asSequence().forEach { entry ->
                     if (!shouldDropApkEntry(entry, dexEntryName)) {
-                        output.putNextEntry(ZipEntry(entry.name))
+                        output.putNextEntry(ZipEntry(entry.name).apply { time = entry.time })
                         if (!entry.isDirectory) {
                             zip.getInputStream(entry).use { input ->
                                 input.copyTo(output)
@@ -289,7 +313,7 @@ tasks.register("stripReleaseDexDebugInfo") {
             }
 
             compactedDex.forEach { file ->
-                output.putNextEntry(ZipEntry(file.name))
+                output.putNextEntry(ZipEntry(file.name).apply { time = dexTimestamp })
                 file.inputStream().use { input ->
                     input.copyTo(output)
                 }
@@ -298,16 +322,16 @@ tasks.register("stripReleaseDexDebugInfo") {
         }
 
         providers.exec {
-            commandLine(zipalign.absolutePath, "-f", "-p", "4", unsignedApk.absolutePath, alignedApk.absolutePath)
+            commandLine(zipalign.get().asFile.absolutePath, "-f", "-p", "4", unsignedApk.absolutePath, alignedApk.absolutePath)
         }.result.get().assertNormalExitValue()
 
-        val signing = android.buildTypes.getByName("release").signingConfig
+        val signing = releaseSigning
         if (signing == null || signing.storeFile == null) {
             throw GradleException("Release signing config is required after stripping dex debug info.")
         }
 
         val signCommand = mutableListOf(
-            apksigner.absolutePath,
+            apksigner.get().asFile.absolutePath,
             "sign",
             "--ks",
             signing.storeFile!!.absolutePath,
@@ -324,12 +348,18 @@ tasks.register("stripReleaseDexDebugInfo") {
         signing.storeType?.let {
             signCommand += listOf("--ks-type", it)
         }
-        signCommand += listOf("--out", apk.absolutePath, alignedApk.absolutePath)
+        signCommand += listOf("--out", processedApk.absolutePath, alignedApk.absolutePath)
 
         providers.exec {
             commandLine(signCommand)
         }.result.get().assertNormalExitValue()
+    }
+}
 
+val exportReleaseApk = tasks.register("exportReleaseApk") {
+    dependsOn(stripReleaseDexDebugInfo)
+    doLast {
+        val apk = processedReleaseApk.get().asFile
         val versionName = android.defaultConfig.versionName ?: "dev"
         val versionCode = android.defaultConfig.versionCode ?: 0
         val timestamp = DateTimeFormatter
@@ -342,6 +372,6 @@ tasks.register("stripReleaseDexDebugInfo") {
 
 afterEvaluate {
     tasks.named("assembleRelease").configure {
-        finalizedBy("stripReleaseDexDebugInfo")
+        finalizedBy(exportReleaseApk)
     }
 }

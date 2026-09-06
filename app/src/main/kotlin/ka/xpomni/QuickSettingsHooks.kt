@@ -6,13 +6,11 @@ import android.content.res.Configuration
 import android.content.res.Resources
 import io.github.libxposed.api.XposedInterface.Chain
 import io.github.libxposed.api.XposedInterface.Hooker
-import java.lang.reflect.Executable
 
 private const val QUICK_QS_ROWS = "quick_qs_paginated_grid_num_rows"
 private const val QUICK_QS_PORTRAIT_ROWS = 3
 private const val QUICK_SETTINGS_ROWS_HOOK_ID = "quick_settings.rows"
 
-@Volatile
 private var quickSettingsRowHooksInstalled = false
 
 @Volatile
@@ -27,24 +25,14 @@ internal fun XpOmniModule.hookQuickSettingsTileRows() {
             Int::class.javaPrimitiveType!!,
         )
 
-        intercept(getInteger, QUICK_SETTINGS_ROWS_HOOK_ID) {
-            handleQuickSettingsRows(this)
-        }
+        intercept(getInteger, QUICK_SETTINGS_ROWS_HOOK_ID)
 
         quickSettingsRowHooksInstalled = true
     }
 }
 
-internal fun XpOmniModule.resolveQuickSettingsHotReloadHook(
-    hookId: String?,
-    executable: Executable,
-): Hooker? {
-    val legacyMatch =
-        executable.declaringClass == Resources::class.java && executable.name == "getInteger"
-    if (hookId != QUICK_SETTINGS_ROWS_HOOK_ID && !legacyMatch) return null
-
-    return Hooker { chain -> handleQuickSettingsRows(chain) }
-}
+internal fun XpOmniModule.resolveQuickSettingsHook(hookId: String?): Hooker? =
+    if (hookId == QUICK_SETTINGS_ROWS_HOOK_ID) Hooker { chain -> handleQuickSettingsRows(chain) } else null
 
 private fun handleQuickSettingsRows(chain: Chain): Any? =
     with(chain) {
@@ -54,6 +42,7 @@ private fun handleQuickSettingsRows(chain: Chain): Any? =
     }
 
 private fun Resources.quickSettingsPortraitRows(resId: Int): Int? {
+    if (quickSettingsRowsId != 0 && resId != quickSettingsRowsId) return null
     if (configuration.orientation != Configuration.ORIENTATION_PORTRAIT) return null
 
     var targetId = quickSettingsRowsId

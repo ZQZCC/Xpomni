@@ -10,7 +10,6 @@ import android.view.SurfaceControl
 import androidx.annotation.RequiresApi
 import io.github.libxposed.api.XposedInterface.Chain
 import io.github.libxposed.api.XposedInterface.Hooker
-import java.lang.reflect.Constructor
 import java.lang.reflect.Executable
 import java.util.concurrent.Executor
 import java.util.function.BiConsumer
@@ -101,12 +100,9 @@ private fun XpOmniModule.deoptimizeMethods(
 
 internal fun XpOmniModule.hookWindowState(classLoader: ClassLoader) {
     val windowStateClass = classLoader.loadClass("com.android.server.wm.WindowState")
-    val systemServerClassLoader = windowStateClass.classLoader
     val isSecureLocked = windowStateClass.getDeclaredMethod("isSecureLocked")
 
-    intercept(isSecureLocked, SCREENSHOT_WINDOW_STATE_HOOK_ID) {
-        handleWindowState(this, classLoader, systemServerClassLoader)
-    }
+    intercept(isSecureLocked, SCREENSHOT_WINDOW_STATE_HOOK_ID, classLoader)
 }
 
 private fun isCalledFromSurfaceCreation(
@@ -153,9 +149,7 @@ internal fun XpOmniModule.hookScreenCapture(classLoader: ClassLoader) {
         SCREENSHOT_CAPTURE_HOOK_ID,
         "nativeCaptureDisplay",
         "nativeCaptureLayers",
-    ) {
-        handleScreenCapture(this, usesSecureContentPolicy)
-    }
+    )
 }
 
 private fun usesSecureContentPolicy(): Boolean =
@@ -167,16 +161,13 @@ private fun writeSecureCaptureFlag(
     usesSecureContentPolicy: Boolean,
 ): Boolean {
     if (captureArgs == null) return false
-    val fields =
-        if (usesSecureContentPolicy) {
-            arrayOf("mSecureContentPolicy" to 1, "mCaptureSecureLayers" to true)
-        } else {
-            arrayOf("mCaptureSecureLayers" to true, "mSecureContentPolicy" to 1)
-        }
-    for ((name, value) in fields) {
-        if (captureArgs.writeField(name, value)) return true
+    return if (usesSecureContentPolicy) {
+        captureArgs.writeField("mSecureContentPolicy", 1) ||
+            captureArgs.writeField("mCaptureSecureLayers", true)
+    } else {
+        captureArgs.writeField("mCaptureSecureLayers", true) ||
+            captureArgs.writeField("mSecureContentPolicy", 1)
     }
-    return false
 }
 
 internal fun XpOmniModule.hookSystemUiScreenshotMute(classLoader: ClassLoader) {
@@ -194,9 +185,7 @@ internal fun XpOmniModule.hookSystemUiScreenshotMute(classLoader: ClassLoader) {
 private fun XpOmniModule.hookScreenshotMediaPlayerStart() {
     val start = MediaPlayer::class.java.getDeclaredMethod("start")
 
-    intercept(start, SCREENSHOT_MEDIA_HOOK_ID) {
-        handleScreenshotMedia(this)
-    }
+    intercept(start, SCREENSHOT_MEDIA_HOOK_ID)
 }
 
 private fun XpOmniModule.hookScreenshotSoundDispatcher(classLoader: ClassLoader) {
@@ -206,17 +195,14 @@ private fun XpOmniModule.hookScreenshotSoundDispatcher(classLoader: ClassLoader)
         takeScreenshotExecutorClass,
         SCREENSHOT_DISPATCHER_HOOK_ID,
         "getScreenshotController",
-    ) {
-        handleScreenshotDispatcher(this, classLoader)
-    }
+        classLoader = classLoader,
+    )
 }
 
 private fun XpOmniModule.hookScreenshotSoundConstructor(classLoader: ClassLoader) {
     val screenshotSoundControllerClass = classLoader.loadClass(SCREENSHOT_SOUND_CONTROLLER_IMPL)
 
-    hookConstructors(screenshotSoundControllerClass, SCREENSHOT_SOUND_CONSTRUCTOR_HOOK_ID) {
-        handleScreenshotSoundConstructor(this, classLoader)
-    }
+    hookConstructors(screenshotSoundControllerClass, SCREENSHOT_SOUND_CONSTRUCTOR_HOOK_ID, classLoader)
 }
 
 internal fun XpOmniModule.hookDisplayControl(classLoader: ClassLoader) {
@@ -226,7 +212,6 @@ internal fun XpOmniModule.hookDisplayControl(classLoader: ClassLoader) {
         } else {
             SurfaceControl::class.java
         }
-    val systemServerClassLoader = displayControlClass.classLoader
     val methodName =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.VANILLA_ICE_CREAM) {
             "createVirtualDisplay"
@@ -239,9 +224,7 @@ internal fun XpOmniModule.hookDisplayControl(classLoader: ClassLoader) {
         Boolean::class.javaPrimitiveType!!,
     )
 
-    intercept(method, SCREENSHOT_DISPLAY_HOOK_ID) {
-        handleDisplayControl(this, classLoader, systemServerClassLoader)
-    }
+    intercept(method, SCREENSHOT_DISPLAY_HOOK_ID, classLoader)
 }
 
 private fun isCalledFromVirtualDisplayCreation(
@@ -263,9 +246,7 @@ internal fun XpOmniModule.hookVirtualDisplayAdapter(classLoader: ClassLoader) {
         virtualDisplayAdapterClass,
         SCREENSHOT_VIRTUAL_DISPLAY_HOOK_ID,
         "createVirtualDisplayLocked",
-    ) {
-        handleVirtualDisplay(this)
-    }
+    )
 }
 
 @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
@@ -280,7 +261,7 @@ internal fun XpOmniModule.hookActivityTaskManagerService(classLoader: ClassLoade
         screenCaptureObserverClass,
     )
 
-    intercept(method, SCREENSHOT_OBSERVER_HOOK_ID) { null }
+    intercept(method, SCREENSHOT_OBSERVER_HOOK_ID)
 }
 
 @RequiresApi(Build.VERSION_CODES.VANILLA_ICE_CREAM)
@@ -294,7 +275,7 @@ internal fun XpOmniModule.hookWindowManagerService(classLoader: ClassLoader) {
         screenRecordingCallbackClass,
     )
 
-    intercept(method, SCREENSHOT_RECORDING_HOOK_ID) { false }
+    intercept(method, SCREENSHOT_RECORDING_HOOK_ID)
 }
 
 internal fun XpOmniModule.hookActivityManagerService(classLoader: ClassLoader) {
@@ -307,18 +288,14 @@ internal fun XpOmniModule.hookActivityManagerService(classLoader: ClassLoader) {
         Int::class.javaPrimitiveType!!,
     )
 
-    intercept(method, SCREENSHOT_PERMISSION_HOOK_ID) {
-        handleCapturePermission(this)
-    }
+    intercept(method, SCREENSHOT_PERMISSION_HOOK_ID)
 }
 
 @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
 internal fun XpOmniModule.hookHyperOS(classLoader: ClassLoader) {
     val windowManagerServiceImplClass =
         classLoader.loadClass("com.android.server.wm.WindowManagerServiceImpl")
-    hookMethods(windowManagerServiceImplClass, SCREENSHOT_HYPEROS_HOOK_ID, "notAllowCaptureDisplay") {
-        false
-    }
+    hookMethods(windowManagerServiceImplClass, SCREENSHOT_HYPEROS_HOOK_ID, "notAllowCaptureDisplay")
 }
 
 internal fun XpOmniModule.hookScreenshotHardwareBuffer(classLoader: ClassLoader) {
@@ -330,7 +307,7 @@ internal fun XpOmniModule.hookScreenshotHardwareBuffer(classLoader: ClassLoader)
         }
     val containsSecureLayers = screenshotHardwareBufferClass.getDeclaredMethod("containsSecureLayers")
 
-    intercept(containsSecureLayers, SCREENSHOT_HARDWARE_BUFFER_HOOK_ID) { false }
+    intercept(containsSecureLayers, SCREENSHOT_HARDWARE_BUFFER_HOOK_ID)
 }
 
 @RequiresApi(Build.VERSION_CODES.VANILLA_ICE_CREAM)
@@ -342,118 +319,72 @@ internal fun XpOmniModule.hookOplusScreenCapture(classLoader: ClassLoader) {
         Long::class.javaPrimitiveType!!,
     )
 
-    intercept(setUid, SCREENSHOT_OPLUS_BUILDER_HOOK_ID) {
-        handleOplusBuilder(this)
-    }
+    intercept(setUid, SCREENSHOT_OPLUS_BUILDER_HOOK_ID)
 }
 
 internal fun XpOmniModule.hookOplus(classLoader: ClassLoader) {
     val longshotMainClass =
         classLoader.loadClass("com.android.server.wm.OplusLongshotMainWindow")
-    hookMethods(longshotMainClass, SCREENSHOT_OPLUS_HOOK_ID, "hasSecure") {
-        false
-    }
+    hookMethods(longshotMainClass, SCREENSHOT_OPLUS_HOOK_ID, "hasSecure")
 }
 
 internal fun XpOmniModule.hookOneUI(classLoader: ClassLoader) {
     val screenshotControllerClass =
         classLoader.loadClass("com.android.server.wm.WmScreenshotController")
-    hookMethods(screenshotControllerClass, SCREENSHOT_ONEUI_HOOK_ID, "canBeScreenshotTarget") {
-        true
-    }
+    hookMethods(screenshotControllerClass, SCREENSHOT_ONEUI_HOOK_ID, "canBeScreenshotTarget")
 }
 
-internal fun XpOmniModule.resolveScreenshotHotReloadHook(
+internal fun XpOmniModule.resolveScreenshotHook(
     hookId: String?,
     executable: Executable,
+    classLoader: ClassLoader? = null,
 ): Hooker? {
-    val className = executable.declaringClass.name
-    val legacyWindowState =
-        className == "com.android.server.wm.WindowState" && executable.name == "isSecureLocked"
-    val legacyCapture =
-        executable.name == "nativeCaptureDisplay" || executable.name == "nativeCaptureLayers"
-    val legacyMedia =
-        executable.declaringClass == MediaPlayer::class.java && executable.name == "start"
-    val legacyDispatcher =
-        className == TAKE_SCREENSHOT_EXECUTOR_IMPL && executable.name == "getScreenshotController"
-    val legacySoundConstructor =
-        executable is Constructor<*> && className == SCREENSHOT_SOUND_CONTROLLER_IMPL
-    val legacyDisplay =
-        executable.name == "createVirtualDisplay" || executable.name == "createDisplay"
-    val legacyVirtualDisplay =
-        className == "com.android.server.display.VirtualDisplayAdapter" &&
-            executable.name == "createVirtualDisplayLocked"
-    val legacyObserver =
-        className == "com.android.server.wm.ActivityTaskManagerService" &&
-            executable.name == "registerScreenCaptureObserver"
-    val legacyRecording =
-        className == "com.android.server.wm.WindowManagerService" &&
-            executable.name == "registerScreenRecordingCallback"
-    val legacyPermission =
-        className == "com.android.server.am.ActivityManagerService" &&
-            executable.name == "checkPermission"
-    val legacyHyperOs =
-        className == "com.android.server.wm.WindowManagerServiceImpl" &&
-            executable.name == "notAllowCaptureDisplay"
-    val legacyHardwareBuffer =
-        executable.name == "containsSecureLayers" &&
-            (className.endsWith("ScreenCapture\$ScreenshotHardwareBuffer") ||
-                className.endsWith("SurfaceControl\$ScreenshotHardwareBuffer"))
-    val legacyOplusBuilder =
-        className == "com.oplus.screenshot.OplusScreenCapture\$CaptureArgs\$Builder" &&
-            executable.name == "setUid"
-    val legacyOplus =
-        className == "com.android.server.wm.OplusLongshotMainWindow" && executable.name == "hasSecure"
-    val legacyOneUi =
-        className == "com.android.server.wm.WmScreenshotController" &&
-            executable.name == "canBeScreenshotTarget"
-
-    return when {
-        hookId == SCREENSHOT_WINDOW_STATE_HOOK_ID || legacyWindowState -> {
-            val loader = executable.reloadClassLoader()
+    return when (hookId) {
+        SCREENSHOT_WINDOW_STATE_HOOK_ID -> {
+            val loader = classLoader ?: executable.reloadClassLoader()
             val hostLoader = executable.declaringClass.classLoader
             Hooker { chain -> handleWindowState(chain, loader, hostLoader) }
         }
 
-        hookId == SCREENSHOT_CAPTURE_HOOK_ID || legacyCapture -> {
+        SCREENSHOT_CAPTURE_HOOK_ID -> {
             val usesSecureContentPolicy = usesSecureContentPolicy()
             Hooker { chain -> handleScreenCapture(chain, usesSecureContentPolicy) }
         }
 
-        hookId == SCREENSHOT_MEDIA_HOOK_ID || legacyMedia ->
+        SCREENSHOT_MEDIA_HOOK_ID ->
             Hooker { chain -> handleScreenshotMedia(chain) }
 
-        hookId == SCREENSHOT_DISPATCHER_HOOK_ID || legacyDispatcher -> {
-            val loader = executable.reloadClassLoader()
+        SCREENSHOT_DISPATCHER_HOOK_ID -> {
+            val loader = classLoader ?: executable.reloadClassLoader()
             Hooker { chain -> handleScreenshotDispatcher(chain, loader) }
         }
 
-        hookId == SCREENSHOT_SOUND_CONSTRUCTOR_HOOK_ID || legacySoundConstructor -> {
-            val loader = executable.reloadClassLoader()
-            Hooker { chain -> handleScreenshotSoundConstructor(chain, loader) }
+        SCREENSHOT_SOUND_CONSTRUCTOR_HOOK_ID -> {
+            val loader = classLoader ?: executable.reloadClassLoader()
+            Hooker { chain -> chain.proceedWithNoOpDispatcherArg(loader) }
         }
 
-        hookId == SCREENSHOT_DISPLAY_HOOK_ID || legacyDisplay -> {
-            val loader = executable.reloadClassLoader()
+        SCREENSHOT_DISPLAY_HOOK_ID -> {
+            val loader = classLoader ?: executable.reloadClassLoader()
             val hostLoader = executable.declaringClass.classLoader
             Hooker { chain -> handleDisplayControl(chain, loader, hostLoader) }
         }
 
-        hookId == SCREENSHOT_VIRTUAL_DISPLAY_HOOK_ID || legacyVirtualDisplay ->
+        SCREENSHOT_VIRTUAL_DISPLAY_HOOK_ID ->
             Hooker { chain -> handleVirtualDisplay(chain) }
 
-        hookId == SCREENSHOT_OBSERVER_HOOK_ID || legacyObserver -> Hooker { null }
-        hookId == SCREENSHOT_RECORDING_HOOK_ID || legacyRecording -> Hooker { false }
-        hookId == SCREENSHOT_PERMISSION_HOOK_ID || legacyPermission ->
+        SCREENSHOT_OBSERVER_HOOK_ID -> Hooker { null }
+        SCREENSHOT_RECORDING_HOOK_ID -> Hooker { false }
+        SCREENSHOT_PERMISSION_HOOK_ID ->
             Hooker { chain -> handleCapturePermission(chain) }
 
-        hookId == SCREENSHOT_HYPEROS_HOOK_ID || legacyHyperOs -> Hooker { false }
-        hookId == SCREENSHOT_HARDWARE_BUFFER_HOOK_ID || legacyHardwareBuffer -> Hooker { false }
-        hookId == SCREENSHOT_OPLUS_BUILDER_HOOK_ID || legacyOplusBuilder ->
+        SCREENSHOT_HYPEROS_HOOK_ID -> Hooker { false }
+        SCREENSHOT_HARDWARE_BUFFER_HOOK_ID -> Hooker { false }
+        SCREENSHOT_OPLUS_BUILDER_HOOK_ID ->
             Hooker { chain -> handleOplusBuilder(chain) }
 
-        hookId == SCREENSHOT_OPLUS_HOOK_ID || legacyOplus -> Hooker { false }
-        hookId == SCREENSHOT_ONEUI_HOOK_ID || legacyOneUi -> Hooker { true }
+        SCREENSHOT_OPLUS_HOOK_ID -> Hooker { false }
+        SCREENSHOT_ONEUI_HOOK_ID -> Hooker { true }
         else -> null
     }
 }
@@ -490,11 +421,6 @@ private fun handleScreenshotDispatcher(
             controller.replaceScreenshotSoundDispatcher(classLoader)
         }
     }
-
-private fun handleScreenshotSoundConstructor(
-    chain: Chain,
-    classLoader: ClassLoader,
-): Any? = chain.proceedWithNoOpDispatcherArg(classLoader)
 
 private fun handleDisplayControl(
     chain: Chain,
@@ -561,20 +487,19 @@ private fun isCalledFromSystemUiScreenshot(): Boolean =
     }
 
 private fun Any?.replaceScreenshotSoundDispatcher(classLoader: ClassLoader) {
+    val soundController = this?.readField("screenshotSoundController") ?: return
     val dispatcher = classLoader.newNoOpCoroutineDispatcherOrNull() ?: return
-    this
-        ?.readField("screenshotSoundController")
-        ?.writeField("bgDispatcher", dispatcher)
+    soundController.writeField("bgDispatcher", dispatcher)
 }
 
 private fun Chain.proceedWithNoOpDispatcherArg(classLoader: ClassLoader): Any? {
-    val updatedArgs = argsArray()
-    val dispatcherIndex = updatedArgs.indexOfFirst { arg ->
+    val dispatcherIndex = args.indexOfFirst { arg ->
         arg?.javaClass?.name?.contains("dispatcher", ignoreCase = true) == true
     }
     if (dispatcherIndex < 0) return proceed()
 
     val dispatcher = classLoader.newNoOpCoroutineDispatcherOrNull() ?: return proceed()
+    val updatedArgs = argsArray()
     updatedArgs[dispatcherIndex] = dispatcher
     return proceed(updatedArgs)
 }
@@ -582,10 +507,8 @@ private fun Chain.proceedWithNoOpDispatcherArg(classLoader: ClassLoader): Any? {
 private fun ClassLoader.newNoOpCoroutineDispatcherOrNull(): Any? =
     runCatching {
         val dispatcherClass = loadClass(EXECUTOR_COROUTINE_DISPATCHER_IMPL)
-        val constructor = dispatcherClass.declaredConstructors
-            .firstOrNull { it.parameterTypes.singleOrNull() == Executor::class.java }
-            ?.apply { isAccessible = true }
-            ?: return@runCatching null
+        val constructor = dispatcherClass.getDeclaredConstructor(Executor::class.java)
+            .apply { isAccessible = true }
 
         constructor.newInstance(NoOpExecutor)
     }.getOrNull()

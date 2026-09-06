@@ -168,10 +168,6 @@ class XpOmniModule : XposedModule() {
                 hookHideDirectShare(classLoader)
             }
 
-            ANDROID_FRAMEWORK, INTENT_RESOLVER -> {
-                // Static scope covers both old and new platform split points.
-            }
-
             ANDROID_SYSTEM_INTELLIGENCE -> {
                 hookShareTargets()
             }

@@ -58,104 +58,72 @@ internal fun XpOmniModule.hookMethods(
     clazz: Class<*>,
     hookId: String,
     vararg names: String,
-    block: Chain.() -> Any?,
+    classLoader: ClassLoader? = null,
 ) {
     for (method in clazz.declaredMethods) {
         if (!method.name.matchesAny(names)) continue
-        intercept(method, hookId, block)
+        intercept(method, hookId, classLoader)
     }
 }
 
 internal fun XpOmniModule.hookConstructors(
     clazz: Class<*>,
     hookId: String,
-    block: Chain.() -> Any?,
+    classLoader: ClassLoader? = null,
 ) {
     clazz.declaredConstructors.forEach { constructor ->
-        intercept(constructor, hookId, block)
+        intercept(constructor, hookId, classLoader)
     }
 }
 
 internal fun XpOmniModule.intercept(
     executable: Executable,
     hookId: String,
-    block: Chain.() -> Any?,
+    classLoader: ClassLoader? = null,
 ) {
+    val hooker = requireNotNull(resolveHook(hookId, executable, classLoader)) {
+        "Unknown hook id: $hookId"
+    }
     hook(executable)
         .setId(hookId)
-        .intercept(Hooker { chain -> chain.block() })
+        .intercept(hooker)
 }
 
 internal fun XpOmniModule.replaceHooksForHotReload(handles: List<HookHandle>) {
     for (handle in handles) {
-        val executable = runCatching { handle.executable }
-            .getOrElse { error ->
-                runCatching { handle.unhook() }
-                log(Log.ERROR, TAG, "hot reload hook missing executable", error)
-                continue
-            }
-
-        val hookId = runCatching { handle.id }.getOrNull()
-        val replacement = runCatching {
-            resolveHotReloadHook(hookId, executable)
-        }.getOrElse { error ->
-            runCatching { handle.unhook() }
-            log(Log.ERROR, TAG, "hot reload hook resolution failed: ${executable.hookId()}", error)
-            continue
-        }
-
-        if (replacement == null) {
-            runCatching { handle.unhook() }
-            log(Log.WARN, TAG, "hot reload hook removed: ${executable.hookId()}")
-            continue
-        }
-
         runCatching {
-            handle.replaceHook(replacement)
+            val executable = handle.executable
+            val replacement = resolveHook(handle.id, executable)
+            if (replacement == null) {
+                handle.unhook()
+                log(Log.WARN, TAG, "hot reload hook removed: $executable")
+            } else {
+                handle.replaceHook(replacement)
+            }
         }.onFailure { error ->
             runCatching { handle.unhook() }
-            log(Log.ERROR, TAG, "hot reload hook replacement failed: ${executable.hookId()}", error)
+            log(Log.ERROR, TAG, "hot reload hook replacement failed", error)
         }
     }
 }
 
-private fun XpOmniModule.resolveHotReloadHook(
+private fun XpOmniModule.resolveHook(
     hookId: String?,
     executable: Executable,
-): Hooker? {
-    if (hookId != null && '#' !in hookId) {
-        return when (hookId.substringBefore('.')) {
-            "biometric" -> resolveBiometricHotReloadHook(hookId, executable)
-            "github" -> resolveGitHubHotReloadHook(hookId, executable)
-            "flud" -> resolveFludHotReloadHook(hookId, executable)
-            "share" -> resolveShareSheetHotReloadHook(hookId, executable)
-            "screenshot" -> resolveScreenshotHotReloadHook(hookId, executable)
-            "keyguard" -> resolveKeyguardHotReloadHook(hookId, executable)
-            "quick_settings" -> resolveQuickSettingsHotReloadHook(hookId, executable)
-            "traffic" -> resolveStatusBarTrafficHotReloadHook(hookId, executable)
-            "pixel" -> resolvePixelLauncherHotReloadHook(hookId, executable)
-            else -> null
-        }
+    classLoader: ClassLoader? = null,
+): Hooker? =
+    when (hookId?.substringBefore('.')) {
+        "biometric" -> resolveBiometricHook(hookId)
+        "github" -> resolveGitHubHook(hookId)
+        "flud" -> resolveFludHook(hookId)
+        "share" -> resolveShareSheetHook(hookId)
+        "screenshot" -> resolveScreenshotHook(hookId, executable, classLoader)
+        "keyguard" -> resolveKeyguardHook(hookId)
+        "quick_settings" -> resolveQuickSettingsHook(hookId)
+        "traffic" -> resolveStatusBarTrafficHook(hookId)
+        "pixel" -> resolvePixelLauncherHook(hookId)
+        else -> null
     }
-
-    return resolveBiometricHotReloadHook(hookId, executable)
-        ?: resolveGitHubHotReloadHook(hookId, executable)
-        ?: resolveFludHotReloadHook(hookId, executable)
-        ?: resolveShareSheetHotReloadHook(hookId, executable)
-        ?: resolveScreenshotHotReloadHook(hookId, executable)
-        ?: resolveKeyguardHotReloadHook(hookId, executable)
-        ?: resolveQuickSettingsHotReloadHook(hookId, executable)
-        ?: resolveStatusBarTrafficHotReloadHook(hookId, executable)
-        ?: resolvePixelLauncherHotReloadHook(hookId, executable)
-}
-
-private fun Executable.hookId(): String =
-    declaringClass.name +
-        "#" +
-        name +
-        "(" +
-        parameterTypes.joinToString(",") { it.name } +
-        ")"
 
 internal fun Chain.afterProceed(action: (Any?) -> Unit): Any? {
     val result = proceed()

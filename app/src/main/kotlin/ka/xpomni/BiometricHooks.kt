@@ -8,7 +8,6 @@ import android.view.View
 import android.widget.Button
 import io.github.libxposed.api.XposedInterface.Chain
 import io.github.libxposed.api.XposedInterface.Hooker
-import java.lang.reflect.Executable
 
 private const val BIOMETRIC_TARGET_CLASS = "com.android.systemui.biometrics.AuthContainerView"
 private const val BIOMETRIC_TARGET_METHOD = "onDialogAnimatedIn"
@@ -33,22 +32,11 @@ private fun XpOmniModule.hookBiometricBypass(classLoader: ClassLoader) {
     val authContainerViewClass = classLoader.loadClass(BIOMETRIC_TARGET_CLASS)
     val onDialogAnimatedIn = authContainerViewClass.getDeclaredMethod(BIOMETRIC_TARGET_METHOD)
 
-    intercept(onDialogAnimatedIn, BIOMETRIC_HOOK_ID) {
-        handleBiometricConfirm(this)
-    }
+    intercept(onDialogAnimatedIn, BIOMETRIC_HOOK_ID)
 }
 
-internal fun XpOmniModule.resolveBiometricHotReloadHook(
-    hookId: String?,
-    executable: Executable,
-): Hooker? {
-    val legacyMatch =
-        executable.declaringClass.name == BIOMETRIC_TARGET_CLASS &&
-            executable.name == BIOMETRIC_TARGET_METHOD
-    if (hookId != BIOMETRIC_HOOK_ID && !legacyMatch) return null
-
-    return Hooker { chain -> handleBiometricConfirm(chain) }
-}
+internal fun XpOmniModule.resolveBiometricHook(hookId: String?): Hooker? =
+    if (hookId == BIOMETRIC_HOOK_ID) Hooker { chain -> handleBiometricConfirm(chain) } else null
 
 private fun XpOmniModule.handleBiometricConfirm(chain: Chain): Any? =
     with(chain) {

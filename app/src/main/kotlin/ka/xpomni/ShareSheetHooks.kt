@@ -9,13 +9,16 @@ import android.content.pm.ShortcutManager
 import android.widget.BaseAdapter
 import io.github.libxposed.api.XposedInterface.Chain
 import io.github.libxposed.api.XposedInterface.Hooker
-import java.lang.reflect.Executable
+import java.lang.reflect.Method
+import java.util.Optional
+import java.util.concurrent.ConcurrentHashMap
 
 private const val SHARE_LOW_RAM_HOOK_ID = "share.low_ram"
 private const val SHARE_SERVICE_COUNT_HOOK_ID = "share.service_count"
 private const val SHARE_TARGETS_HOOK_ID = "share.targets"
 private const val SHARE_KITOOL_UNSTACK_HOOK_ID = "share.kitool_unstack"
 private const val KITOOL_PACKAGE = "ka.kitool"
+private val shareGroupReaders = ConcurrentHashMap<Class<*>, Optional<Method>>()
 
 internal fun XpOmniModule.hookHideDirectShare(classLoader: ClassLoader) {
     runHook("hook DirectShare low-ram") {
@@ -36,7 +39,7 @@ private fun XpOmniModule.hookLowRamDeviceStatic() {
         ActivityManager::class.java.getDeclaredMethod("isLowRamDeviceStatic")
             .apply { isAccessible = true }
 
-    intercept(isLowRamDeviceStatic, SHARE_LOW_RAM_HOOK_ID) { true }
+    intercept(isLowRamDeviceStatic, SHARE_LOW_RAM_HOOK_ID)
 }
 
 private fun XpOmniModule.hookServiceTargetCountFallback(classLoader: ClassLoader) {
@@ -46,7 +49,7 @@ private fun XpOmniModule.hookServiceTargetCountFallback(classLoader: ClassLoader
         chooserListAdapterClass.getDeclaredMethod("getServiceTargetCount")
             .apply { isAccessible = true }
 
-    intercept(getServiceTargetCount, SHARE_SERVICE_COUNT_HOOK_ID) { 0 }
+    intercept(getServiceTargetCount, SHARE_SERVICE_COUNT_HOOK_ID)
 }
 
 private fun XpOmniModule.hookKitoolShareActivities() {
@@ -54,9 +57,7 @@ private fun XpOmniModule.hookKitoolShareActivities() {
         BaseAdapter::class.java.getDeclaredMethod("notifyDataSetChanged")
             .apply { isAccessible = true }
 
-    intercept(notifyDataSetChanged, SHARE_KITOOL_UNSTACK_HOOK_ID) {
-        unstackKitoolShareActivities()
-    }
+    intercept(notifyDataSetChanged, SHARE_KITOOL_UNSTACK_HOOK_ID)
 }
 
 private fun Chain.unstackKitoolShareActivities(): Any? {
@@ -78,10 +79,11 @@ private fun Any.unstackKitoolShareActivities() {
 }
 
 private fun Any.shareGroupMembersOrNull(): List<*>? {
-    val method =
-        methodOrNull("getAllDisplayTargets", 0)
-            ?: methodOrNull("getTargets", 0)
-            ?: return null
+    val method = shareGroupReaders.computeIfAbsent(javaClass) {
+        Optional.ofNullable(
+            methodOrNull("getAllDisplayTargets", 0) ?: methodOrNull("getTargets", 0),
+        )
+    }.orElse(null) ?: return null
     return attempt<List<*>?>(null) {
         (method.invoke(this) as? List<*>)?.takeIf { it.size > 1 }
     }
@@ -100,31 +102,17 @@ internal fun XpOmniModule.hookShareTargets() {
             IntentFilter::class.java,
         ).apply { isAccessible = true }
 
-    intercept(getShareTargets, SHARE_TARGETS_HOOK_ID) { emptyList<Any>() }
+    intercept(getShareTargets, SHARE_TARGETS_HOOK_ID)
 }
 
-internal fun XpOmniModule.resolveShareSheetHotReloadHook(
+internal fun XpOmniModule.resolveShareSheetHook(
     hookId: String?,
-    executable: Executable,
 ): Hooker? {
-    val legacyLowRam =
-        executable.declaringClass == ActivityManager::class.java &&
-            executable.name == "isLowRamDeviceStatic"
-    val legacyServiceCount =
-        executable.declaringClass.name == "com.android.intentresolver.ChooserListAdapter" &&
-            executable.name == "getServiceTargetCount"
-    val legacyTargets =
-        executable.declaringClass == ShortcutManager::class.java &&
-            executable.name == "getShareTargets"
-    val legacyKitoolUnstack =
-        executable.declaringClass == BaseAdapter::class.java &&
-            executable.name == "notifyDataSetChanged"
-
-    return when {
-        hookId == SHARE_LOW_RAM_HOOK_ID || legacyLowRam -> Hooker { true }
-        hookId == SHARE_SERVICE_COUNT_HOOK_ID || legacyServiceCount -> Hooker { 0 }
-        hookId == SHARE_TARGETS_HOOK_ID || legacyTargets -> Hooker { emptyList<Any>() }
-        hookId == SHARE_KITOOL_UNSTACK_HOOK_ID || legacyKitoolUnstack ->
+    return when (hookId) {
+        SHARE_LOW_RAM_HOOK_ID -> Hooker { true }
+        SHARE_SERVICE_COUNT_HOOK_ID -> Hooker { 0 }
+        SHARE_TARGETS_HOOK_ID -> Hooker { emptyList<Any>() }
+        SHARE_KITOOL_UNSTACK_HOOK_ID ->
             Hooker { chain -> chain.unstackKitoolShareActivities() }
         else -> null
     }
