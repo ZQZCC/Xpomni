@@ -2,112 +2,34 @@
 
 package ka.xpomni
 
-import android.util.Log
 import android.os.SystemClock
+import android.util.Log
 import android.view.View
 import android.widget.Button
-import io.github.libxposed.api.XposedInterface.Chain
-import io.github.libxposed.api.XposedInterface.Hooker
 
-private const val BIOMETRIC_TARGET_CLASS = "com.android.systemui.biometrics.AuthContainerView"
-private const val BIOMETRIC_TARGET_METHOD = "onDialogAnimatedIn"
-private const val BIOMETRIC_BUTTON_CONFIRM_ID = "button_confirm"
-private const val BIOMETRIC_MAX_WAIT_MS = 1_500L
-private const val BIOMETRIC_HOOK_ID = "biometric.confirm"
-
-@Volatile
-private var biometricConfirmButtonId = 0
-
-internal fun XpOmniModule.runBiometricHook(classLoader: ClassLoader) {
-    runCatching {
-        hookBiometricBypass(classLoader)
-    }.onFailure { error ->
-        if (error !is ClassNotFoundException && error !is NoSuchMethodException) {
-            log(Log.ERROR, TAG, "hook BiometricBypass failed", error)
+internal fun XpOmniModule.hookBiometricBypass(classLoader: ClassLoader) {
+    val method = classLoader.loadClass("com.android.systemui.biometrics.AuthContainerView")
+        .getDeclaredMethod("onDialogAnimatedIn")
+    var confirmId = 0
+    hook(method).intercept { chain ->
+        chain.proceed().also {
+            val view = chain.thisObject as View
+            if (confirmId == 0)
+                confirmId = view.resources.getIdentifier("button_confirm", "id", SYSTEMUI)
+            if (confirmId == 0) {
+                log(Log.WARN, TAG, "Biometric confirm button id not found")
+            } else {
+                val deadline = SystemClock.uptimeMillis() + 1_500L
+                object : Runnable {
+                    override fun run() {
+                        if (!view.isAttachedToWindow) return
+                        val button = view.findViewById<Button>(confirmId)
+                        if (button != null && button.isShown && button.performClick()) return
+                        if (SystemClock.uptimeMillis() < deadline) view.postOnAnimation(this)
+                        else log(Log.WARN, TAG, "Biometric confirmation timed out")
+                    }
+                }.run()
+            }
         }
-    }
-}
-
-private fun XpOmniModule.hookBiometricBypass(classLoader: ClassLoader) {
-    val authContainerViewClass = classLoader.loadClass(BIOMETRIC_TARGET_CLASS)
-    val onDialogAnimatedIn = authContainerViewClass.getDeclaredMethod(BIOMETRIC_TARGET_METHOD)
-
-    intercept(onDialogAnimatedIn, BIOMETRIC_HOOK_ID)
-}
-
-internal fun XpOmniModule.resolveBiometricHook(hookId: String?): Hooker? =
-    if (hookId == BIOMETRIC_HOOK_ID) Hooker { chain -> handleBiometricConfirm(chain) } else null
-
-private fun XpOmniModule.handleBiometricConfirm(chain: Chain): Any? =
-    with(chain) {
-        val result = proceed()
-        (thisObject as? View)?.let { authContainerView ->
-            requestBiometricConfirm(authContainerView)
-        }
-        result
-    }
-
-private fun XpOmniModule.requestBiometricConfirm(authContainerView: View) {
-    val buttonId = authContainerView.biometricConfirmButtonId()
-
-    if (buttonId == 0) {
-        log(Log.WARN, TAG, "Biometric confirm button id not found")
-        return
-    }
-
-    val startUptimeMs = SystemClock.uptimeMillis()
-    if (clickBiometricConfirmButton(authContainerView, buttonId)) {
-        return
-    }
-
-    retryBiometricConfirmUntilShown(
-        parentView = authContainerView,
-        buttonId = buttonId,
-        startUptimeMs = startUptimeMs,
-    )
-}
-
-private fun View.biometricConfirmButtonId(): Int {
-    val cachedId = biometricConfirmButtonId
-    if (cachedId != 0) return cachedId
-
-    val id = context.resources.getIdentifier(
-        BIOMETRIC_BUTTON_CONFIRM_ID,
-        "id",
-        context.packageName,
-    )
-    biometricConfirmButtonId = id
-    return id
-}
-
-private fun clickBiometricConfirmButton(
-    parentView: View,
-    buttonId: Int,
-): Boolean {
-    val button = parentView.findViewById<Button?>(buttonId)
-    if (button == null || !button.isShown) {
-        return false
-    }
-
-    return button.performClick()
-}
-
-private fun XpOmniModule.retryBiometricConfirmUntilShown(
-    parentView: View,
-    buttonId: Int,
-    startUptimeMs: Long,
-) {
-    parentView.postOnAnimation {
-        if (clickBiometricConfirmButton(parentView, buttonId)) {
-            return@postOnAnimation
-        }
-
-        val elapsedMs = SystemClock.uptimeMillis() - startUptimeMs
-        if (elapsedMs >= BIOMETRIC_MAX_WAIT_MS) {
-            log(Log.WARN, TAG, "Biometric confirm button not found after ${elapsedMs}ms")
-            return@postOnAnimation
-        }
-
-        retryBiometricConfirmUntilShown(parentView, buttonId, startUptimeMs)
     }
 }

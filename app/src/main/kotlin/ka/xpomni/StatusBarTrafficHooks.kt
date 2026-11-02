@@ -29,7 +29,7 @@ import kotlin.math.max
 private const val PHONE_STATUS_BAR_VIEW_CONTROLLER =
     "com.android.systemui.statusbar.phone.PhoneStatusBarViewController"
 private const val STATUS_BAR_CLOCK = "com.android.systemui.statusbar.policy.Clock"
-private const val STATUS_ICONS_ID = "statusIcons"
+private const val END_SIDE_CONTENT_ID = "status_bar_end_side_content"
 private const val CLOCK_ID = "clock"
 private const val TRAFFIC_REFRESH_INTERVAL_MS = 1_000L
 private const val TRAFFIC_AUTO_HIDE_THRESHOLD_BYTES = 100L * 1024L
@@ -40,66 +40,36 @@ private const val TRAFFIC_SYMBOL = "/s"
 private const val TRAFFIC_INDICATOR_TAG = "ka.xpomni.STATUS_BAR_TRAFFIC"
 private const val STATUS_BAR_CLOCK_STARTING_PADDING = "status_bar_clock_starting_padding"
 private const val STATUS_BAR_LEFT_CLOCK_END_PADDING = "status_bar_left_clock_end_padding"
-private const val TRAFFIC_ATTACH_HOOK_ID = "traffic.attach"
-private const val TRAFFIC_COLOR_HOOK_ID = "traffic.color"
 
 @Volatile
 private var trafficIndicatorRef: WeakReference<StatusBarTrafficView>? = null
 
 internal fun XpOmniModule.hookStatusBarTrafficIndicator(classLoader: ClassLoader) {
     val controllerClass = classLoader.loadClass(PHONE_STATUS_BAR_VIEW_CONTROLLER)
+    val viewField = controllerClass.findField("mView")
 
-    hookMethods(controllerClass, TRAFFIC_ATTACH_HOOK_ID, "onViewAttached")
-
-    runCatching { classLoader.loadClass(STATUS_BAR_CLOCK) }.getOrNull()?.let { clockClass ->
-        hookMethods(clockClass, TRAFFIC_COLOR_HOOK_ID, "onDarkChanged")
-    }
+    hookMethods(controllerClass, Hooker { chain ->
+        chain.afterProceed { (viewField.get(it) as ViewGroup).installTrafficIndicator() }
+    }, "onViewAttached")
+    hookMethods(classLoader.loadClass(STATUS_BAR_CLOCK), Hooker(::handleTrafficColor), "onDarkChanged")
 }
-
-internal fun XpOmniModule.resolveStatusBarTrafficHook(
-    hookId: String?,
-): Hooker? {
-    return when (hookId) {
-        TRAFFIC_ATTACH_HOOK_ID ->
-            Hooker { chain -> handleTrafficAttach(chain) }
-
-        TRAFFIC_COLOR_HOOK_ID ->
-            Hooker { chain -> handleTrafficColor(chain) }
-
-        else -> null
-    }
-}
-
-private fun handleTrafficAttach(chain: Chain): Any? =
-    with(chain) {
-        proceed().also {
-            thisObject
-                ?.statusBarViewOrNull()
-                ?.installTrafficIndicator()
-        }
-    }
 
 private fun handleTrafficColor(chain: Chain): Any? =
     with(chain) {
         proceed().also {
             val clock = thisObject as? TextView ?: return@also
-            trafficIndicatorRef?.get()?.setTextColor(clock.currentTextColor)
-            if (trafficIndicatorRef?.get()?.parent == null) {
+            if (trafficIndicatorRef?.get()?.parent == null)
                 (clock.rootView as? ViewGroup)?.installTrafficIndicator()
-            }
+            trafficIndicatorRef?.get()?.takeIf { it.rootView === clock.rootView }
+                ?.setTextColor(clock.currentTextColor)
         }
     }
 
-private fun Any.statusBarViewOrNull(): ViewGroup? =
-    (readField("mView") as? ViewGroup)
-        ?: (readField("mPhoneStatusBarView") as? ViewGroup)
-
 private fun ViewGroup.installTrafficIndicator() {
-    val systemIcons = findSystemIcons() ?: return
-    val parent = systemIcons.parent as? ViewGroup ?: return
+    val parent = findChildByResourceName(END_SIDE_CONTENT_ID) as? ViewGroup ?: return
     val indicator = StatusBarTrafficView(context)
 
-    parent.removeTrafficIndicators(systemIcons)
+    parent.removeTrafficIndicators()
     indicator.tag = TRAFFIC_INDICATOR_TAG
 
     findClock()?.let { clock ->
@@ -135,18 +105,14 @@ private fun ViewGroup.trafficLayoutParams(): ViewGroup.LayoutParams =
         )
     }
 
-private fun ViewGroup.removeTrafficIndicators(systemIcons: View) {
+private fun ViewGroup.removeTrafficIndicators() {
     for (index in childCount - 1 downTo 0) {
         val child = getChildAt(index)
-        if (child === systemIcons) continue
         if (child.tag == TRAFFIC_INDICATOR_TAG) {
             removeView(child)
         }
     }
 }
-
-private fun View.findSystemIcons(): ViewGroup? =
-    findChildByResourceName(STATUS_ICONS_ID) as? ViewGroup
 
 private fun View.findClock(): TextView? =
     findChildByResourceName(CLOCK_ID) as? TextView
@@ -187,9 +153,20 @@ private class StatusBarTrafficView(context: Context) : TextView(context) {
 
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
-        resetCounters()
+        updateScheduling()
+    }
+
+    override fun onWindowVisibilityChanged(visibility: Int) {
+        super.onWindowVisibilityChanged(visibility)
+        updateScheduling()
+    }
+
+    private fun updateScheduling() {
         handler.removeCallbacks(updateRunnable)
-        handler.postDelayed(updateRunnable, TRAFFIC_REFRESH_INTERVAL_MS)
+        if (isAttachedToWindow && windowVisibility == VISIBLE) {
+            resetCounters()
+            handler.postDelayed(updateRunnable, TRAFFIC_REFRESH_INTERVAL_MS)
+        }
     }
 
     override fun onDetachedFromWindow() {

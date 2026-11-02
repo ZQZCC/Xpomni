@@ -8,28 +8,22 @@ import android.util.AtomicFile
 import android.util.Log
 import android.widget.Toast
 import io.github.libxposed.api.XposedInterface.Chain
-import io.github.libxposed.api.XposedInterface.Hooker
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
-import java.text.SimpleDateFormat
-import java.util.Date
+import java.time.LocalDate
+import java.time.format.DateTimeFormatter
 import java.util.LinkedHashSet
-import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 
 internal const val FLUD_PLUS = "com.delphicoder.flud.paid"
-private const val FLUD_ATTACH_HOOK_ID = "flud.attach"
 
 internal fun XpOmniModule.hookFludTrackerUpdater() {
     val attach = Application::class.java.getDeclaredMethod("attach", Context::class.java)
     attach.isAccessible = true
 
-    intercept(attach, FLUD_ATTACH_HOOK_ID)
+    hook(attach).intercept { chain -> handleFludAttach(chain) }
 }
-
-internal fun XpOmniModule.resolveFludHook(hookId: String?): Hooker? =
-    if (hookId == FLUD_ATTACH_HOOK_ID) Hooker { chain -> handleFludAttach(chain) } else null
 
 private fun XpOmniModule.handleFludAttach(chain: Chain): Any? =
     with(chain) {
@@ -41,8 +35,6 @@ private fun XpOmniModule.handleFludAttach(chain: Chain): Any? =
         }
         result
     }
-
-internal fun isFludTrackerUpdaterIdle(): Boolean = !FludTrackerUpdater.isUpdating
 
 private object FludTrackerUpdater {
     private val SOURCES = arrayOf(
@@ -67,9 +59,6 @@ private object FludTrackerUpdater {
         Regex("""(?i)\b(?:udp|https?|wss?)://[^\s"'<>]+?announce[^\s"'<>]*""")
 
     private val updating = AtomicBoolean()
-
-    val isUpdating: Boolean
-        get() = updating.get()
 
     fun updateIfNeeded(
         context: Context,
@@ -198,7 +187,7 @@ private object FludTrackerUpdater {
     }
 
     private fun today(): String {
-        return SimpleDateFormat("yyyyMMdd", Locale.US).format(Date())
+        return LocalDate.now().format(DateTimeFormatter.BASIC_ISO_DATE)
     }
 
     private fun toast(
