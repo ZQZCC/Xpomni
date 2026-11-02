@@ -14,7 +14,7 @@ plugins {
     id("com.android.application")
 }
 
-val appMinSdk = 31
+val appMinSdk = 37
 
 fun readIntLe(bytes: ByteArray, offset: Int): Int =
     (bytes[offset].toInt() and 0xff) or
@@ -143,8 +143,8 @@ android {
         applicationId = "ka.xpomni"
         minSdk = appMinSdk
         targetSdk = 37
-        versionCode = 16
-        versionName = "1.3.3"
+        versionCode = 1
+        versionName = "1.0.0"
     }
 
     signingConfigs {
@@ -206,7 +206,6 @@ android {
 }
 
 dependencies {
-    compileOnly("androidx.annotation:annotation:1.9.1")
     compileOnly("io.github.libxposed:api:102.0.0")
 }
 
@@ -333,6 +332,7 @@ val stripReleaseDexDebugInfo = tasks.register("stripReleaseDexDebugInfo") {
         val signCommand = mutableListOf(
             apksigner.get().asFile.absolutePath,
             "sign",
+            "--v1-signing-enabled", "false",
             "--ks",
             signing.storeFile!!.absolutePath,
         )

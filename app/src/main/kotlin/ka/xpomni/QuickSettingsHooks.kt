@@ -5,34 +5,20 @@ package ka.xpomni
 import android.content.res.Configuration
 import android.content.res.Resources
 import io.github.libxposed.api.XposedInterface.Chain
-import io.github.libxposed.api.XposedInterface.Hooker
 
 private const val QUICK_QS_ROWS = "quick_qs_paginated_grid_num_rows"
 private const val QUICK_QS_PORTRAIT_ROWS = 3
-private const val QUICK_SETTINGS_ROWS_HOOK_ID = "quick_settings.rows"
-
-private var quickSettingsRowHooksInstalled = false
-
 @Volatile
 private var quickSettingsRowsId = 0
 
 internal fun XpOmniModule.hookQuickSettingsTileRows() {
-    synchronized(XpOmniModule::class.java) {
-        if (quickSettingsRowHooksInstalled) return@synchronized
+    val getInteger = Resources::class.java.getDeclaredMethod(
+        "getInteger",
+        Int::class.javaPrimitiveType!!,
+    )
 
-        val getInteger = Resources::class.java.getDeclaredMethod(
-            "getInteger",
-            Int::class.javaPrimitiveType!!,
-        )
-
-        intercept(getInteger, QUICK_SETTINGS_ROWS_HOOK_ID)
-
-        quickSettingsRowHooksInstalled = true
-    }
+    hook(getInteger).intercept(::handleQuickSettingsRows)
 }
-
-internal fun XpOmniModule.resolveQuickSettingsHook(hookId: String?): Hooker? =
-    if (hookId == QUICK_SETTINGS_ROWS_HOOK_ID) Hooker { chain -> handleQuickSettingsRows(chain) } else null
 
 private fun handleQuickSettingsRows(chain: Chain): Any? =
     with(chain) {
